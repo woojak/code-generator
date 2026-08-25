@@ -1,1 +1,1 @@
-# No custom ProGuard rules are required for the diagnostic build.
+# No custom ProGuard rules are required for this build.

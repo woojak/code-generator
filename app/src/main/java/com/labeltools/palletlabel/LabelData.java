@@ -6,6 +6,7 @@ public class LabelData {
     public String topRightLarge = "91/NR";
     public String productLine = "RC SCRUB YOZAKURA";
     public String packArticleLine = "125G1120211";
+    public String madeIn = "";
     public String contentGtin = "08720296062361";
     public int cartons = 16;
     public int piecesPerCarton = 60;

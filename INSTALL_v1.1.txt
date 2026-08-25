@@ -1,0 +1,20 @@
+Pallet Label Generator v1.1 - update instructions
+
+1. Upload Pallet_Label_Generator_v1.1_GitHub.zip to the root of the GitHub Codespace/repository.
+2. In the Codespaces terminal run:
+
+unzip -o Pallet_Label_Generator_v1.1_GitHub.zip -d .
+git add -A
+git commit -m "Pallet Label Generator v1.1 OCR UI"
+git push
+
+3. Open GitHub Actions and wait for:
+   Build Pallet Label APK
+
+4. Download artifact:
+   Pallet-Label-Generator-v1.1-debug
+
+Notes:
+- Direct printer support is intentionally not used.
+- Main workflow is Scan -> Check data -> Pallet -> Share PDF.
+- Existing SSCC stored in the installed Android app is preserved by the app preferences when upgrading the APK with the same applicationId.

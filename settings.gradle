@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "T8306PrinterTest"
+rootProject.name = "PalletLabelGenerator"
 include ':app'

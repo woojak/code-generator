@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Pallet Label APK
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
     branches: [ "main", "master" ]
     paths-ignore:
       - "README.md"
+      - "*.zip"
 
 jobs:
   build:
@@ -38,6 +39,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: T8306-Printer-Test-debug
+          name: Pallet-Label-Generator-v1.0-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error

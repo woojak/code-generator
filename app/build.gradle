@@ -3,15 +3,15 @@ plugins {
 }
 
 android {
-    namespace 'com.labeltools.t8306test'
+    namespace 'com.labeltools.palletlabel'
     compileSdk 35
 
     defaultConfig {
-        applicationId 'com.labeltools.t8306test'
+        applicationId 'com.labeltools.palletlabel'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
+        versionCode 10
+        versionName '1.0.0'
     }
 
     compileOptions {
@@ -25,4 +25,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.15.0'
+    implementation 'com.google.zxing:core:3.5.3'
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+    implementation 'com.google.mlkit:barcode-scanning:17.3.0'
 }

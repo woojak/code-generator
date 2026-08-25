@@ -33,3 +33,11 @@ dependencies {
     implementation 'com.google.mlkit:text-recognition:16.0.1'
     implementation 'com.google.mlkit:barcode-scanning:17.3.0'
 }
+
+configurations.configureEach {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'org.jetbrains.kotlin') {
+            details.useVersion '1.8.22'
+        }
+    }
+}

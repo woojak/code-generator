@@ -80,12 +80,21 @@ public class MainActivity extends Activity {
     private Uri pendingCameraUri;
     private byte[] pendingPdf;
     private String lastOcrText = "";
+    private long activeScanGeneration = 0L;
+    private AlertDialog verificationDialog;
 
     private static class ScanSession {
+        final long generation;
+        final String forcedMode;
         int pending = 2;
         String text = "";
         String enhancedText = "";
         List<String> barcodeValues = new ArrayList<>();
+
+        ScanSession(long generation, String forcedMode) {
+            this.generation = generation;
+            this.forcedMode = forcedMode;
+        }
     }
 
     @Override
@@ -125,7 +134,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView version = new TextView(this);
-        version.setText("v1.3.0 • brown OCR+ • safe GS1 • offline");
+        version.setText("v1.3.1 • scan isolation • safe GS1 • offline");
         version.setTextSize(13);
         version.setTextColor(Color.rgb(90, 90, 90));
         version.setPadding(0, dp(2), 0, dp(8));
@@ -455,6 +464,13 @@ public class MainActivity extends Activity {
     }
 
     private void analyzeImage(Uri uri) {
+        final long generation = ++activeScanGeneration;
+        if (verificationDialog != null && verificationDialog.isShowing()) {
+            verificationDialog.dismiss();
+        }
+        verificationDialog = null;
+        lastOcrText = "";
+
         String forcedMode = scanModeSpinner.getSelectedItem().toString();
         boolean brownEnhancement = "RITUALS BROWN".equals(forcedMode);
         photoStatus.setText(brownEnhancement
@@ -462,7 +478,7 @@ public class MainActivity extends Activity {
                 : "Analizuję: OCR + barcode...");
         try {
             InputImage image = InputImage.fromFilePath(this, uri);
-            ScanSession session = new ScanSession();
+            ScanSession session = new ScanSession(generation, forcedMode);
             session.pending = brownEnhancement ? 3 : 2;
 
             textRecognizer.process(image)
@@ -540,8 +556,11 @@ public class MainActivity extends Activity {
     }
 
     private synchronized void scanPartDone(ScanSession session) {
+        if (session.generation != activeScanGeneration) return;
+
         session.pending--;
         if (session.pending != 0) return;
+        if (session.generation != activeScanGeneration) return;
 
         StringBuilder merged = new StringBuilder();
         if (session.text != null && !session.text.trim().isEmpty()) merged.append(session.text.trim());
@@ -551,11 +570,10 @@ public class MainActivity extends Activity {
         }
         lastOcrText = merged.toString();
 
-        String forced = scanModeSpinner.getSelectedItem().toString();
-        OcrResult result = OcrParser.parse(lastOcrText, forced);
+        OcrResult result = OcrParser.parse(lastOcrText, session.forcedMode);
         OcrParser.applyBarcodeValues(result, session.barcodeValues);
-        enrichFromCache(result);
-        showVerification(result);
+        // v1.3.1: OCR nie jest automatycznie nadpisywany historią/cache.
+        showVerification(result, session.generation);
     }
 
     private void enrichFromCache(OcrResult r) {
@@ -583,7 +601,8 @@ public class MainActivity extends Activity {
         r.cacheUsed = used;
     }
 
-    private void showVerification(OcrResult r) {
+    private void showVerification(OcrResult r, long generation) {
+        if (generation != activeScanGeneration) return;
         detectedTypeText.setText("Typ: " + r.detectedType);
         StringBuilder sb = new StringBuilder();
         sb.append("Typ: ").append(r.detectedType).append("\n\n");
@@ -604,12 +623,25 @@ public class MainActivity extends Activity {
         for (String warning : r.warnings) sb.append("\n⚠ ").append(warning);
         if (!r.hasAnyData()) sb.append("\n⚠ Nie znaleziono pewnych danych. Możesz anulować i poprawić zdjęcie.");
 
-        new AlertDialog.Builder(this)
+        if (verificationDialog != null && verificationDialog.isShowing()) {
+            verificationDialog.dismiss();
+        }
+
+        verificationDialog = new AlertDialog.Builder(this)
                 .setTitle("Sprawdź odczyt OCR")
                 .setMessage(sb.toString())
-                .setNegativeButton("ANULUJ", null)
-                .setPositiveButton("UŻYJ TYCH DANYCH", (d, which) -> applyOcrResult(r))
-                .show();
+                .setNegativeButton("ANULUJ", (d, which) -> verificationDialog = null)
+                .setPositiveButton("UŻYJ TYCH DANYCH", (d, which) -> {
+                    if (generation != activeScanGeneration) {
+                        toast("Ten wynik OCR jest już nieaktualny. Użyj wyniku ostatniego skanu.");
+                        return;
+                    }
+                    applyOcrResult(r);
+                    verificationDialog = null;
+                })
+                .create();
+        verificationDialog.setOnDismissListener(d -> verificationDialog = null);
+        verificationDialog.show();
     }
 
     private void addSummary(StringBuilder sb, String label, String value, OcrResult.Confidence c) {
@@ -686,7 +718,6 @@ public class MainActivity extends Activity {
         photoStatus.setText(status);
 
         saveForm();
-        if (!mainArticle().isEmpty()) saveProductCache();
         updateTotal();
         generatePreview(false);
     }
@@ -827,7 +858,7 @@ public class MainActivity extends Activity {
                 gs1Status.setText("GS1-128:\n" + d.barcode1Human() + "\n" + d.barcode2Human() + " [FNC1 po Batch]\n" + d.barcode3Human()
                         + "\n\nRazem: " + d.totalPieces() + " szt.");
             }
-            saveForm(); saveProductCache();
+            saveForm();
             if (notify) toast("Etykieta wygenerowana.");
         } catch (Exception e) { if (gs1Status != null) gs1Status.setText("Błąd: " + e.getMessage()); if (notify) toast(e.getMessage()); }
     }
@@ -838,7 +869,7 @@ public class MainActivity extends Activity {
 
     private void savePdf() {
         try {
-            LabelData d = readData(); pendingPdf = renderPdf(d); saveForm(); saveProductCache();
+            LabelData d = readData(); pendingPdf = renderPdf(d); saveForm();
             Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("application/pdf"); i.putExtra(Intent.EXTRA_TITLE, fileName(d));
             startActivityForResult(i, REQ_SAVE_PDF);
@@ -856,7 +887,7 @@ public class MainActivity extends Activity {
             share.putExtra(Intent.EXTRA_SUBJECT, (isLogistics() ? "Logistics pallet label - " : "Pallet label - ") + d.article + " - Batch " + d.batch);
             share.putExtra(Intent.EXTRA_TEXT, "Pallet label attached.\nProduct: " + d.productLine + "\nArticle: " + d.article + "\nBatch: " + d.batch + "\nSSCC: " + d.sscc);
             share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            saveForm(); saveProductCache();
+            saveForm();
             startActivity(Intent.createChooser(share, "Udostępnij etykietę PDF"));
         } catch (Exception e) { toast("Nie można udostępnić PDF: " + e.getMessage()); }
     }

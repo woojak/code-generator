@@ -92,12 +92,12 @@ public final class OcrParser {
 
     private static void parseArticles(List<String> lines, OcrResult r) {
         Pattern inline = Pattern.compile(
-                "(?i)art\s*\.?\s*nr\s*\.?\s*(tu\s*/\s*cu|cu\s*/\s*tu|tu|cu)\s*[:.\-]?\s*(\d{5,12})");
+                "(?i)art\\s*\\.?\\s*nr\\s*\\.?\\s*(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s*[:.-]?\\s*(\\d{5,12})");
         Pattern reversed = Pattern.compile(
-                "(?i)\b(tu\s*/\s*cu|cu\s*/\s*tu|tu|cu)\s+art\s*\.?\s*nr\s*\.?\s*[:.\-]?\s*(\d{5,12})");
+                "(?i)\\b(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s+art\\s*\\.?\\s*nr\\s*\\.?\\s*[:.-]?\\s*(\\d{5,12})");
         Pattern labelOnly = Pattern.compile(
-                "(?i)^.*art\s*\.?\s*nr\s*\.?\s*(tu\s*/\s*cu|cu\s*/\s*tu|tu|cu)\s*[:.\-]?\s*$");
-        Pattern valueOnly = Pattern.compile("^\d{5,12}$");
+                "(?i)^.*art\\s*\\.?\\s*nr\\s*\\.?\\s*(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s*[:.-]?\\s*$");
+        Pattern valueOnly = Pattern.compile("^\\d{5,12}$");
 
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i);
@@ -136,7 +136,7 @@ public final class OcrParser {
     }
 
     private static void applyArticleValue(OcrResult r, String kindRaw, String value) {
-        String kind = kindRaw.toUpperCase(Locale.ROOT).replaceAll("\s+", "");
+        String kind = kindRaw.toUpperCase(Locale.ROOT).replaceAll("\\s+", "");
         if (kind.contains("/")) {
             r.articleTu = value;
             r.articleCu = value;
@@ -149,11 +149,11 @@ public final class OcrParser {
 
     private static void parseBatch(List<String> lines, OcrResult r) {
         Pattern inline = Pattern.compile(
-                "(?i)^.*?\bbatch\s*(?:code|/\s*lot)?\s*[:.\-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\s*$");
+                "(?i)^.*?\\bbatch\\s*(?:code|/\\s*lot)?\\s*[:.-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\s*$");
         Pattern lot = Pattern.compile(
-                "(?i)^.*?\blot\s*[:.\-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\s*$");
+                "(?i)^.*?\\blot\\s*[:.-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\s*$");
         Pattern labelOnly = Pattern.compile(
-                "(?i)^.*?\b(?:batch(?:\s*code|\s*/\s*lot)?|lot)\s*[:.\-]?\s*$");
+                "(?i)^.*?\\b(?:batch(?:\\s*code|\\s*/\\s*lot)?|lot)\\s*[:.-]?\\s*$");
         Pattern token = Pattern.compile("(?i)^[A-Z0-9][A-Z0-9-]{2,19}$");
 
         for (int i = 0; i < lines.size(); i++) {
@@ -170,7 +170,6 @@ public final class OcrParser {
                 }
             }
 
-            // OCR often puts "Batch" and the value on separate lines.
             if (labelOnly.matcher(line).matches() && i + 1 < lines.size()) {
                 String value = lines.get(i + 1).trim();
                 if (token.matcher(value).matches() && isUsableBatch(value)) {
@@ -181,10 +180,8 @@ public final class OcrParser {
             }
         }
 
-        // Semifinished labels sometimes expose a short alphanumeric batch
-        // such as AM26/FYR628 without a clean "Batch:" line.
         if (r.detectedType.equals("SEMIFINISHED")) {
-            Pattern semiBatch = Pattern.compile("(?i)^(?:[A-Z]{1,6}\d{2,8}|\d{2,8}[A-Z]{1,6})$");
+            Pattern semiBatch = Pattern.compile("(?i)^(?:[A-Z]{1,6}\\d{2,8}|\\d{2,8}[A-Z]{1,6})$");
             for (String line : lines) {
                 String value = line.trim();
                 if (semiBatch.matcher(value).matches() && isUsableBatch(value)) {

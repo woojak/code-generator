@@ -1,56 +1,33 @@
-# Pallet Label Generator v1.1
+# Pallet Label Generator v1.2
 
-Offline Android application for preparing GS1 pallet labels.
+Offline Android application for reading warehouse carton labels and generating pallet-label PDFs.
 
-## v1.1
+## v1.2 changes
 
-This release is focused on the real carton-label variants used in the warehouse.
+- Multi-layout OCR with AUTO mode and manual modes:
+  - RITUALS WHITE
+  - RITUALS BROWN
+  - SEMIFINISHED
+  - PALLET LOGISTICS
+- OCR verification dialog before scanned values overwrite the form.
+- Separate Article TU and Article CU.
+- Robust line-based Batch parser (prevents values such as `RITUALS` being selected as Batch).
+- Product name + separate product description.
+- Reads `Made in`, `EXP`, `PO code`, quantity × EAN and logistics-table fields.
+- Barcode result has priority for packaging GTIN-14; text fallback remains available.
+- Local product cache by Article. It can restore product name / description / GTIN / pieces / country; Batch is never cached.
+- Two output templates:
+  - STANDARD: current 3 × GS1-128 pallet label.
+  - LOGISTICS (BETA): SSCC / ARTICLE / MATERIAL / CONTENT / CUSTOMER SKU / COUNT / EXPIRY / BATCH / gross pallet weight + 2 GS1-128.
+- 2D code on Logistics is NEVER guessed. Data Matrix is generated only if the exact payload is entered manually; otherwise a clearly marked placeholder is printed.
+- Share PDF remains the main output workflow.
+- GitHub Actions artifact renamed to `Pallet-Label-Generator-v1.2-debug`.
+- `actions/setup-java` updated to v5.
 
-### OCR improvements
+## Important
 
-- Product name now overwrites old/default data when a confident `The Ritual of ...` line is found.
-- Recognizes names split over two lines, for example:
-  - `The Ritual of Ayurveda`
-  - `Hair and Body mist`
-- Better handling of `Art.Nr.TU`, `Art Nr. TU`, `Art.Nr.CU` and spacing variants.
-- Better `Batch code` / `Batch Code` / `Lot` recognition.
-- Reads quantities written as `12 x GTIN`, `25 X GTIN`, `60 x GTIN`, `100 x GTIN`, etc.
-- Accepts GTIN-13 / EAN-13 and safely normalizes it to GTIN-14 by adding the leading zero only when the GS1 check digit is valid.
-- Tries barcode scan first / in parallel and falls back to visible OCR digits.
-- Reads `Made in ...` as an informational field.
-- Tries to build the pack/article line automatically from a detected size such as `125g`, `100ml`, `140g` plus Article.
-
-### UI improvements
-
-The long technical form was reorganized into four clear steps:
-
-1. Scan carton label.
-2. Check product data.
-3. Set pallet data / SSCC.
-4. Preview and share PDF.
-
-Less frequently used fields (`REF`, top-right fields, pack/article line) are hidden under **Advanced fields** by default.
-
-GS1 technical details are also collapsed by default.
-
-### PDF / sharing
-
-- PDF size remains 105 × 148 mm.
-- GS1-128 remains generated mathematically using Code 128 + FNC1.
-- Long product names are automatically scaled to fit the label.
-- `Share PDF` is the main output action.
-- Email/share subject is prefilled as:
-  `Pallet label - ARTICLE - Batch BATCH`
-- File name format:
-  `Pallet_ARTICLE_Batch_BATCH_SSCC_SSCC.pdf`
-- No direct printer or corporate-network connection is used.
-
-## SSCC warning
-
-The SSCC counter is stored only on this phone. For a reprint, keep the same SSCC.
-For a new pallet, use **New SSCC** once.
+The exact 2D payload/specification from the logistics reference label is not known yet. v1.2 deliberately does not fabricate it.
 
 ## Build
 
-GitHub Actions builds `app-debug.apk` on every push to `main` / `master`.
-The artifact is named `Pallet-Label-Generator-v1.1-debug`.
+GitHub Actions builds `app-debug.apk` on push to `main` / `master`.

@@ -1,1 +1,1 @@
-# No custom ProGuard rules are required for this build.
+# No custom ProGuard rules are required for the debug build.

@@ -1,8 +1,10 @@
 package com.labeltools.palletlabel;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -13,24 +15,17 @@ public final class OcrParser {
         OcrResult r = new OcrResult();
         List<String> lines = cleanLines(text);
         String all = String.join("\n", lines);
+        String flat = all.replace('\n', ' ');
         String lowerAll = all.toLowerCase(Locale.ROOT);
 
-        if (forcedMode != null && !forcedMode.equalsIgnoreCase("AUTO")) {
-            r.detectedType = forcedMode;
-        } else if (lowerAll.contains("semifinished")) {
-            r.detectedType = "SEMIFINISHED";
-        } else if (lowerAll.contains("sscc") && lowerAll.contains("customer sku")) {
-            r.detectedType = "PALLET LOGISTICS";
-        } else if (lowerAll.contains("rituals")) {
-            r.detectedType = "RITUALS CARTON";
-        }
+        r.detectedType = detectType(lowerAll, forcedMode);
 
-        parseArticles(lines, r);
-        parseBatch(lines, r);
-        parseQuantityAndEan(lines, r);
-        parseMadeIn(lines, r);
-        parseExpiry(lines, r);
-        parsePo(lines, r);
+        parseArticles(lines, flat, r);
+        parseQuantityAndEan(lines, flat, r);
+        parseBatch(lines, flat, r);
+        parseMadeIn(lines, flat, r);
+        parseExpiry(lines, flat, r);
+        parsePo(lines, flat, r);
         parseLogisticsFields(lines, r);
         parseProduct(lines, r);
         findPackageGtin(lines, r);
@@ -38,40 +33,82 @@ public final class OcrParser {
         if (r.article.isEmpty()) {
             r.article = !r.articleCu.isEmpty() ? r.articleCu : r.articleTu;
         }
-        if (r.detectedType.equals("PALLET LOGISTICS") && !r.customerSku.isEmpty()) {
+        if ("PALLET LOGISTICS".equals(r.detectedType) && !r.customerSku.isEmpty()) {
             r.article = r.customerSku;
             if (r.articleTu.isEmpty()) r.articleTu = r.customerSku;
             if (r.articleCu.isEmpty()) r.articleCu = r.customerSku;
-        } else if (r.customerSku.isEmpty() && r.detectedType.equals("PALLET LOGISTICS")) {
+        } else if ("PALLET LOGISTICS".equals(r.detectedType) && r.customerSku.isEmpty()) {
             r.customerSku = r.article;
         }
         if (r.material.isEmpty()) r.material = r.productName;
+
+        if (r.packageGtin14.isEmpty() && !r.unitEan.isEmpty()) {
+            String derived = Gs1Utils.normalizeGtin14(r.unitEan);
+            if (!derived.isEmpty()) {
+                r.packageGtin14 = derived;
+                r.gtinSource = "UNIT_EAN_DERIVED";
+                r.mark("gtin", OcrResult.Confidence.MEDIUM);
+                r.warn("GTIN-14 utworzono z EAN produktu. Sprawdź kod kartonu przed wydrukiem.");
+            }
+        }
+
         return r;
     }
 
-    public static void applyBarcodeValues(OcrResult r, List<String> rawValues) {
-        if (rawValues == null) return;
+    private static String detectType(String lowerAll, String forcedMode) {
+        if (forcedMode != null && !forcedMode.trim().isEmpty() && !"AUTO".equalsIgnoreCase(forcedMode)) {
+            return forcedMode.trim().toUpperCase(Locale.ROOT);
+        }
+        if (lowerAll.contains("semifinished")) return "SEMIFINISHED";
+        if (lowerAll.contains("sscc") && (lowerAll.contains("customer sku") || lowerAll.contains("material"))) {
+            return "PALLET LOGISTICS";
+        }
+        if (lowerAll.contains("rituals") || lowerAll.contains("ritual of") || lowerAll.contains("art nr")) {
+            return "RITUALS CARTON";
+        }
+        return "UNKNOWN";
+    }
 
-        // Prefer a real 14-digit package GTIN over an EAN-13 from the unit.
-        // This prevents a scanned unit EAN from overwriting a package GTIN
-        // already read from the carton text/barcode.
+    public static void applyBarcodeValues(OcrResult r, List<String> rawValues) {
+        if (rawValues == null || rawValues.isEmpty()) return;
+
+        List<String> valid14 = new ArrayList<>();
+        List<String> valid13 = new ArrayList<>();
         for (String raw : rawValues) {
-            String digits = Gs1Utils.digitsOnly(raw);
-            if (digits.length() == 14 && Gs1Utils.isValidGtin14(digits)) {
-                r.packageGtin14 = digits;
+            String d = Gs1Utils.digitsOnly(raw);
+            if (d.isEmpty()) continue;
+            if (!r.barcodeCandidates.contains(d)) r.barcodeCandidates.add(d);
+            if (d.length() == 14 && Gs1Utils.isValidGtin14(d)) valid14.add(d);
+            else if (d.length() == 13 && Gs1Utils.isValidGtin13(d)) valid13.add(d);
+        }
+
+        if (!valid14.isEmpty()) {
+            r.packageGtin14 = valid14.get(0);
+            r.gtinSource = "BARCODE_14";
+            r.mark("gtin", OcrResult.Confidence.HIGH);
+            return;
+        }
+
+        String unit = Gs1Utils.digitsOnly(r.unitEan);
+        for (String d : valid13) {
+            if (!d.equals(unit)) {
+                r.packageGtin14 = "0" + d;
+                r.gtinSource = "BARCODE_13_PACKAGE";
                 r.mark("gtin", OcrResult.Confidence.HIGH);
                 return;
             }
         }
 
-        // A 13-digit code is only a fallback when no package GTIN was found.
-        if (!r.packageGtin14.isEmpty()) return;
-        for (String raw : rawValues) {
-            String normalized = Gs1Utils.normalizeGtin14(raw);
-            if (!normalized.isEmpty()) {
-                r.packageGtin14 = normalized;
+        if (!valid13.isEmpty() && (r.packageGtin14.isEmpty() || "UNIT_EAN_DERIVED".equals(r.gtinSource))) {
+            String d = valid13.get(0);
+            r.packageGtin14 = "0" + d;
+            if (d.equals(unit)) {
+                r.gtinSource = "UNIT_EAN_DERIVED";
                 r.mark("gtin", OcrResult.Confidence.MEDIUM);
-                return;
+                r.warn("Skaner znalazł tylko EAN produktu. Brak pewnego kodu kartonu.");
+            } else {
+                r.gtinSource = "BARCODE_13_PACKAGE";
+                r.mark("gtin", OcrResult.Confidence.HIGH);
             }
         }
     }
@@ -81,6 +118,8 @@ public final class OcrParser {
         if (text == null) return out;
         for (String raw : text.split("\\R")) {
             String s = raw.replace('\u00a0', ' ')
+                    .replace('—', '-')
+                    .replace('–', '-')
                     .replaceAll("\\s{2,}", " ")
                     .replaceAll("^[|:;,. ]+", "")
                     .replaceAll("[|]+$", "")
@@ -90,44 +129,30 @@ public final class OcrParser {
         return out;
     }
 
-    private static void parseArticles(List<String> lines, OcrResult r) {
+    private static void parseArticles(List<String> lines, String flat, OcrResult r) {
         Pattern inline = Pattern.compile(
-                "(?i)art\\s*\\.?\\s*nr\\s*\\.?\\s*(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s*[:.-]?\\s*(\\d{5,12})");
-        Pattern reversed = Pattern.compile(
-                "(?i)\\b(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s+art\\s*\\.?\\s*nr\\s*\\.?\\s*[:.-]?\\s*(\\d{5,12})");
-        Pattern labelOnly = Pattern.compile(
-                "(?i)^.*art\\s*\\.?\\s*nr\\s*\\.?\\s*(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s*[:.-]?\\s*$");
-        Pattern valueOnly = Pattern.compile("^\\d{5,12}$");
-
-        for (int i = 0; i < lines.size(); i++) {
-            String line = lines.get(i);
-            String kind = "";
-            String value = "";
-
+                "(?i)art\\s*\\.?\\s*nr\\s*\\.?\\s*(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s*[:.\\-]?\\s*([0-9OQDISBL|]{5,16})");
+        for (String line : lines) {
             Matcher m = inline.matcher(line);
-            if (m.find()) {
-                kind = m.group(1);
-                value = m.group(2);
-            } else {
-                m = reversed.matcher(line);
-                if (m.find()) {
-                    kind = m.group(1);
-                    value = m.group(2);
-                } else {
-                    m = labelOnly.matcher(line);
-                    if (m.matches() && i + 1 < lines.size()) {
-                        Matcher next = valueOnly.matcher(lines.get(i + 1).trim());
-                        if (next.matches()) {
-                            kind = m.group(1);
-                            value = next.group();
-                        }
-                    }
-                }
-            }
+            while (m.find()) applyArticle(r, m.group(1), m.group(2), OcrResult.Confidence.HIGH);
+        }
 
-            if (!value.isEmpty()) {
-                applyArticleValue(r, kind, value);
-                r.mark("article", OcrResult.Confidence.HIGH);
+        Matcher flatMatcher = inline.matcher(flat);
+        while (flatMatcher.find()) {
+            applyArticle(r, flatMatcher.group(1), flatMatcher.group(2), OcrResult.Confidence.MEDIUM);
+        }
+
+        Pattern labelOnly = Pattern.compile(
+                "(?i)^.*art\\s*\\.?\\s*nr\\s*\\.?\\s*(tu\\s*/\\s*cu|cu\\s*/\\s*tu|tu|cu)\\s*[:.\\-]?\\s*$");
+        for (int i = 0; i < lines.size(); i++) {
+            Matcher m = labelOnly.matcher(lines.get(i));
+            if (!m.matches()) continue;
+            for (int j = i + 1; j < Math.min(lines.size(), i + 3); j++) {
+                String value = normalizeNumericToken(lines.get(j));
+                if (value.matches("\\d{5,12}")) {
+                    applyArticle(r, m.group(1), value, OcrResult.Confidence.MEDIUM);
+                    break;
+                }
             }
         }
 
@@ -135,57 +160,87 @@ public final class OcrParser {
         else if (!r.articleTu.isEmpty()) r.article = r.articleTu;
     }
 
-    private static void applyArticleValue(OcrResult r, String kindRaw, String value) {
+    private static void applyArticle(OcrResult r, String kindRaw, String rawValue, OcrResult.Confidence confidence) {
+        String value = normalizeNumericToken(rawValue);
+        if (!value.matches("\\d{5,12}")) return;
         String kind = kindRaw.toUpperCase(Locale.ROOT).replaceAll("\\s+", "");
         if (kind.contains("/")) {
             r.articleTu = value;
             r.articleCu = value;
-        } else if (kind.equals("TU")) {
+        } else if ("TU".equals(kind)) {
             r.articleTu = value;
-        } else if (kind.equals("CU")) {
+        } else if ("CU".equals(kind)) {
             r.articleCu = value;
+        }
+        r.article = !r.articleCu.isEmpty() ? r.articleCu : r.articleTu;
+        r.mark("article", confidence);
+    }
+
+    private static void parseQuantityAndEan(List<String> lines, String flat, OcrResult r) {
+        Pattern p = Pattern.compile("(?i)(\\d{1,5})\\s*[x×X]\\s*([0-9OQDISB|][0-9OQDISBL| ]{11,20})");
+        for (String line : lines) {
+            Matcher m = p.matcher(line);
+            if (!m.find()) continue;
+            String qty = Gs1Utils.digitsOnly(m.group(1));
+            String ean = normalizeNumericToken(m.group(2));
+            if (ean.length() > 14) ean = ean.substring(0, 14);
+            if (!qty.isEmpty() && (Gs1Utils.isValidGtin13(ean) || Gs1Utils.isValidGtin14(ean))) {
+                r.piecesPerCarton = qty;
+                r.unitEan = ean;
+                r.mark("pieces", OcrResult.Confidence.HIGH);
+                return;
+            }
+        }
+
+        Pattern compact = Pattern.compile("(?i)(\\d{1,5})\\s*[x×X]\\s*([0-9OQDISB|]{13,14})(?![0-9OQDISBL|])");
+        Matcher fm = compact.matcher(flat);
+        if (fm.find()) {
+            String ean = normalizeNumericToken(fm.group(2));
+            if (Gs1Utils.isValidGtin13(ean) || Gs1Utils.isValidGtin14(ean)) {
+                r.piecesPerCarton = Gs1Utils.digitsOnly(fm.group(1));
+                r.unitEan = ean;
+                r.mark("pieces", OcrResult.Confidence.MEDIUM);
+            }
         }
     }
 
-    private static void parseBatch(List<String> lines, OcrResult r) {
-        Pattern inline = Pattern.compile(
-                "(?i)^.*?\\bbatch\\s*(?:code|/\\s*lot)?\\s*[:.-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\s*$");
-        Pattern lot = Pattern.compile(
-                "(?i)^.*?\\blot\\s*[:.-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\s*$");
-        Pattern labelOnly = Pattern.compile(
-                "(?i)^.*?\\b(?:batch(?:\\s*code|\\s*/\\s*lot)?|lot)\\s*[:.-]?\\s*$");
-        Pattern token = Pattern.compile("(?i)^[A-Z0-9][A-Z0-9-]{2,19}$");
-
-        for (int i = 0; i < lines.size(); i++) {
-            String line = lines.get(i);
-            Matcher m = inline.matcher(line);
-            if (!m.matches()) m = lot.matcher(line);
-
-            if (m.matches()) {
-                String value = m.group(1).trim();
-                if (isUsableBatch(value)) {
-                    r.batch = value;
-                    r.mark("batch", OcrResult.Confidence.HIGH);
-                    return;
-                }
-            }
-
-            if (labelOnly.matcher(line).matches() && i + 1 < lines.size()) {
-                String value = lines.get(i + 1).trim();
-                if (token.matcher(value).matches() && isUsableBatch(value)) {
-                    r.batch = value;
-                    r.mark("batch", OcrResult.Confidence.HIGH);
-                    return;
-                }
+    private static void parseBatch(List<String> lines, String flat, OcrResult r) {
+        Pattern p = Pattern.compile("(?i)\\b(?:batch(?:\\s*code)?|lot)\\s*[:.\\-]?\\s*([A-Za-z0-9][A-Za-z0-9-]{2,19})");
+        for (String line : lines) {
+            Matcher m = p.matcher(line);
+            if (m.find()) {
+                setBatch(r, m.group(1), OcrResult.Confidence.HIGH);
+                if (!r.batch.isEmpty()) return;
             }
         }
 
-        if (r.detectedType.equals("SEMIFINISHED")) {
-            Pattern semiBatch = Pattern.compile("(?i)^(?:[A-Z]{1,6}\\d{2,8}|\\d{2,8}[A-Z]{1,6})$");
+        Matcher fm = p.matcher(flat);
+        if (fm.find()) {
+            setBatch(r, fm.group(1), OcrResult.Confidence.MEDIUM);
+            if (!r.batch.isEmpty()) return;
+        }
+
+        Pattern labelOnly = Pattern.compile("(?i)^.*\\b(?:batch(?:\\s*code)?|lot)\\s*[:.\\-]?\\s*$");
+        for (int i = 0; i < lines.size(); i++) {
+            if (!labelOnly.matcher(lines.get(i)).matches()) continue;
+            if (i + 1 < lines.size()) {
+                setBatch(r, lines.get(i + 1), OcrResult.Confidence.MEDIUM);
+                if (!r.batch.isEmpty()) return;
+            }
+        }
+
+        if ("SEMIFINISHED".equals(r.detectedType)) {
+            Set<String> excluded = new HashSet<>();
+            addIfNotEmpty(excluded, r.article);
+            addIfNotEmpty(excluded, r.articleTu);
+            addIfNotEmpty(excluded, r.articleCu);
+            addIfNotEmpty(excluded, r.unitEan);
+            addIfNotEmpty(excluded, r.poCode);
+            Pattern semi = Pattern.compile("(?i)^(?:[A-Z]{1,6}\\d{2,8}|\\d{2,8}[A-Z]{1,6})$");
             for (String line : lines) {
-                String value = line.trim();
-                if (semiBatch.matcher(value).matches() && isUsableBatch(value)) {
-                    r.batch = value;
+                String v = line.trim().replaceAll("[^A-Za-z0-9-]", "");
+                if (semi.matcher(v).matches() && !excluded.contains(v) && isUsableBatch(v)) {
+                    r.batch = v.toUpperCase(Locale.ROOT);
                     r.mark("batch", OcrResult.Confidence.MEDIUM);
                     return;
                 }
@@ -193,80 +248,83 @@ public final class OcrParser {
         }
     }
 
+    private static void setBatch(OcrResult r, String raw, OcrResult.Confidence confidence) {
+        if (raw == null) return;
+        String v = raw.trim().replaceAll("^[^A-Za-z0-9]+|[^A-Za-z0-9-]+$", "");
+        if (!isUsableBatch(v)) return;
+
+        if (v.matches("(?i)^[GOQ][0-9]{5,12}$")) {
+            v = "0" + v.substring(1);
+            r.batchNormalized = true;
+            confidence = OcrResult.Confidence.MEDIUM;
+            r.warn("Batch miał typowy błąd OCR na pierwszym znaku i został poprawiony do " + v + ".");
+        }
+        r.batch = v.toUpperCase(Locale.ROOT);
+        r.mark("batch", confidence);
+    }
+
     private static boolean isUsableBatch(String value) {
         if (value == null) return false;
         String v = value.trim();
         if (v.length() < 3 || v.length() > 20) return false;
         String u = v.toUpperCase(Locale.ROOT);
-        return !u.equals("RITUALS")
-                && !u.equals("CODE")
-                && !u.equals("BATCH")
-                && !u.equals("LOT")
-                && !u.equals("SEMIFINISHED");
+        return !u.equals("RITUALS") && !u.equals("CODE") && !u.equals("BATCH")
+                && !u.equals("LOT") && !u.equals("SEMIFINISHED") && !u.equals("ARTICLE");
     }
 
-    private static void parseQuantityAndEan(List<String> lines, OcrResult r) {
-        Pattern p = Pattern.compile("(?i)(\\d{1,5})\\s*[x×X]\\s*(\\d{12,14})");
+    private static void parseMadeIn(List<String> lines, String flat, OcrResult r) {
+        Pattern p = Pattern.compile("(?i)\\bmade\\s*in\\s*[:.\\-]?\\s*([A-Za-zÀ-ž][A-Za-zÀ-ž .'-]{1,39})");
         for (String line : lines) {
             Matcher m = p.matcher(line);
             if (m.find()) {
-                r.piecesPerCarton = m.group(1);
-                r.unitEan = m.group(2);
-                r.mark("pieces", OcrResult.Confidence.HIGH);
-                String normalized = Gs1Utils.normalizeGtin14(r.unitEan);
-                if (!normalized.isEmpty() && r.packageGtin14.isEmpty()) {
-                    r.packageGtin14 = normalized;
-                    r.mark("gtin", OcrResult.Confidence.MEDIUM);
-                }
+                r.madeIn = cleanCountry(m.group(1));
+                r.mark("madeIn", OcrResult.Confidence.HIGH);
                 return;
+            }
+        }
+        Matcher fm = p.matcher(flat);
+        if (fm.find()) {
+            String country = cleanCountry(fm.group(1));
+            if (!country.isEmpty()) {
+                r.madeIn = country;
+                r.mark("madeIn", OcrResult.Confidence.MEDIUM);
             }
         }
     }
 
-    private static void parseMadeIn(List<String> lines, OcrResult r) {
-        Pattern p = Pattern.compile("(?i)\\bmade\\s*in\\s*:?\\s*(.+)$");
-        for (String line : lines) {
-            Matcher m = p.matcher(line);
-            if (m.find()) {
-                String v = m.group(1).replaceAll("[^A-Za-zÀ-ž .'-]", "").trim();
-                if (v.length() >= 2 && v.length() <= 40) {
-                    r.madeIn = v;
-                    r.mark("madeIn", OcrResult.Confidence.HIGH);
-                    return;
-                }
-            }
+    private static String cleanCountry(String s) {
+        String v = s.replaceAll("(?i)\\b(?:art|batch|lan|ref|rituals).*", "")
+                .replaceAll("\\s{2,}", " ").trim();
+        return v.length() > 40 ? v.substring(0, 40).trim() : v;
+    }
+
+    private static void parseExpiry(List<String> lines, String flat, OcrResult r) {
+        Pattern p = Pattern.compile(
+                "(?i)\\b(?:exp|expiry)(?:\\s*date)?(?:\\s*\\([^)]*\\))?\\s*[:.\\-]?\\s*(\\d{4}[/-]\\d{2}(?:[/-]\\d{2})?|\\d{2}[/-]\\d{2}[/-]\\d{2,4})");
+        Matcher m = p.matcher(flat);
+        if (m.find()) {
+            r.expiryRaw = m.group(1);
+            r.mark("expiry", OcrResult.Confidence.HIGH);
         }
     }
 
-    private static void parseExpiry(List<String> lines, OcrResult r) {
-        Pattern p = Pattern.compile("(?i)\\b(?:exp|expiry)(?:\\s*date)?(?:\\s*\\([^)]*\\))?\\s*[:.\\-]?\\s*(\\d{4}[/-]\\d{2}(?:[/-]\\d{2})?|\\d{2}[/-]\\d{2}[/-]\\d{2,4})");
-        for (String line : lines) {
-            Matcher m = p.matcher(line);
-            if (m.find()) {
-                r.expiryRaw = m.group(1);
-                r.mark("expiry", OcrResult.Confidence.HIGH);
-                return;
-            }
-        }
-    }
-
-    private static void parsePo(List<String> lines, OcrResult r) {
-        Pattern p = Pattern.compile("(?i)\\bpo\\s*code\\s*[:.\\-]?\\s*([A-Z0-9-]{4,30})");
-        for (String line : lines) {
-            Matcher m = p.matcher(line);
-            if (m.find()) {
-                r.poCode = m.group(1);
-                r.mark("po", OcrResult.Confidence.HIGH);
-                return;
-            }
+    private static void parsePo(List<String> lines, String flat, OcrResult r) {
+        Pattern p = Pattern.compile("(?i)\\bpo\\s*(?:code)?\\s*[:.\\-]?\\s*([A-Z0-9-]{4,30})");
+        Matcher m = p.matcher(flat);
+        if (m.find()) {
+            r.poCode = m.group(1).toUpperCase(Locale.ROOT);
+            r.mark("po", OcrResult.Confidence.HIGH);
         }
     }
 
     private static void parseLogisticsFields(List<String> lines, OcrResult r) {
+        if (!"PALLET LOGISTICS".equals(r.detectedType)) return;
+
         Pattern ssccP = Pattern.compile("(?<!\\d)(\\d(?:[ ]?\\d){17})(?!\\d)");
         Pattern countP = Pattern.compile("(?i)^count\\s*[:.\\-]?\\s*(\\d{1,6})$");
         Pattern grossP = Pattern.compile("(?i).*brutto\\s+pallet\\s+weight.*?([0-9]+[,.][0-9]+)");
         Pattern skuP = Pattern.compile("(?i).*customer\\s+sku\\s*[:.\\-]?\\s*(\\d{5,15})");
+
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i);
             String lower = line.toLowerCase(Locale.ROOT);
@@ -285,7 +343,6 @@ public final class OcrParser {
             Matcher km = skuP.matcher(line);
             if (km.find()) r.customerSku = km.group(1);
 
-            // Common OCR output keeps table headers in one line and values in the next line.
             if (lower.contains("article") && lower.contains("material") && i + 1 < lines.size()) {
                 Matcher row = Pattern.compile("^(\\d{5,12})\\s+(.+)$").matcher(lines.get(i + 1));
                 if (row.find()) {
@@ -299,28 +356,25 @@ public final class OcrParser {
                 Matcher row = Pattern.compile("^(\\d{13,14})\\s+(\\d{5,15})\\s+(\\d{1,6})$").matcher(lines.get(i + 1));
                 if (row.find()) {
                     String g = Gs1Utils.normalizeGtin14(row.group(1));
-                    if (!g.isEmpty()) { r.packageGtin14 = g; r.mark("gtin", OcrResult.Confidence.HIGH); }
+                    if (!g.isEmpty()) {
+                        r.packageGtin14 = g;
+                        r.gtinSource = "LOGISTICS_CONTENT";
+                        r.mark("gtin", OcrResult.Confidence.HIGH);
+                    }
                     r.customerSku = row.group(2);
                     r.palletCount = row.group(3);
                 }
             }
             if (lower.contains("expiry") && lower.contains("batch") && lower.contains("brutto") && i + 1 < lines.size()) {
-                Matcher row = Pattern.compile("^(\\d{4}[/-]\\d{2})\\s+([A-Z0-9-]{3,20})\\s+([0-9]+[,.][0-9]+)$", Pattern.CASE_INSENSITIVE)
-                        .matcher(lines.get(i + 1));
+                Matcher row = Pattern.compile("^(\\d{4}[/-]\\d{2}(?:[/-]\\d{2})?)\\s+([A-Z0-9-]{3,20})\\s+([0-9]+[,.][0-9]+)$",
+                        Pattern.CASE_INSENSITIVE).matcher(lines.get(i + 1));
                 if (row.find()) {
                     r.expiryRaw = row.group(1);
-                    r.batch = row.group(2);
+                    r.batch = row.group(2).toUpperCase(Locale.ROOT);
                     r.grossWeight = row.group(3);
                     r.mark("expiry", OcrResult.Confidence.HIGH);
                     r.mark("batch", OcrResult.Confidence.HIGH);
                 }
-            }
-
-            if (lower.equals("material") && i + 1 < lines.size()) r.material = lines.get(i + 1);
-            if (lower.equals("customer sku") && i + 1 < lines.size()) r.customerSku = Gs1Utils.digitsOnly(lines.get(i + 1));
-            if (lower.equals("count") && i + 1 < lines.size()) {
-                String v = Gs1Utils.digitsOnly(lines.get(i + 1));
-                if (!v.isEmpty()) r.palletCount = v;
             }
         }
     }
@@ -328,8 +382,8 @@ public final class OcrParser {
     private static void parseProduct(List<String> lines, OcrResult r) {
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i);
-            String lower = line.toLowerCase(Locale.ROOT);
-            if (lower.contains("the ritual of ")) {
+            String normalized = line.toLowerCase(Locale.ROOT).replaceAll("[._-]+", " ");
+            if (normalized.contains("the ritual of ") || normalized.contains("ritual of ")) {
                 r.productName = cleanProduct(line);
                 r.mark("product", OcrResult.Confidence.HIGH);
                 if (i + 1 < lines.size() && isDescription(lines.get(i + 1))) {
@@ -340,7 +394,40 @@ public final class OcrParser {
             }
         }
 
-        if (r.detectedType.equals("SEMIFINISHED")) {
+        if ("RITUALS BROWN".equals(r.detectedType) || "RITUALS CARTON".equals(r.detectedType)
+                || "RITUALS WHITE".equals(r.detectedType)) {
+            int best = -1;
+            int bestScore = 0;
+            for (int i = 0; i < lines.size(); i++) {
+                int score = productCandidateScore(lines.get(i));
+                if (score > bestScore) {
+                    best = i;
+                    bestScore = score;
+                }
+            }
+            if (best >= 0 && bestScore >= 3) {
+                r.productName = cleanProduct(lines.get(best));
+                r.mark("product", OcrResult.Confidence.MEDIUM);
+                if (best + 1 < lines.size() && isDescription(lines.get(best + 1))) {
+                    r.description = cleanProduct(lines.get(best + 1));
+                    r.mark("description", OcrResult.Confidence.MEDIUM);
+                }
+                return;
+            }
+        }
+
+        if ("SEMIFINISHED".equals(r.detectedType)) {
+            for (String line : lines) {
+                String lower = line.toLowerCase(Locale.ROOT);
+                if (lower.contains("semifinished")) {
+                    String cleaned = cleanProduct(line.replaceAll("(?i)semifinished\\s*[:.-]?", ""));
+                    if (isDescription(cleaned)) {
+                        r.productName = cleaned;
+                        r.mark("product", OcrResult.Confidence.MEDIUM);
+                        return;
+                    }
+                }
+            }
             for (String line : lines) {
                 if (isDescription(line) && !line.toLowerCase(Locale.ROOT).contains("semifinished")) {
                     r.productName = cleanProduct(line);
@@ -350,20 +437,36 @@ public final class OcrParser {
             }
         }
 
-        if (r.detectedType.equals("PALLET LOGISTICS") && !r.material.isEmpty()) {
+        if ("PALLET LOGISTICS".equals(r.detectedType) && !r.material.isEmpty()) {
             r.productName = r.material;
             r.mark("product", OcrResult.Confidence.HIGH);
         }
+    }
+
+    private static int productCandidateScore(String line) {
+        if (!isDescription(line)) return 0;
+        String lower = line.toLowerCase(Locale.ROOT);
+        int score = 0;
+        String[] keywords = {
+                "body", "cream", "scrub", "shower", "gel", "candle", "mask", "mist", "paste",
+                "foaming", "sugar", "overnight", "hand", "foot", "hair", "ribbon", "scented",
+                "yozakura", "ayurveda", "jing", "mehr", "karma", "ritual"
+        };
+        for (String k : keywords) if (lower.contains(k)) score++;
+        if (lower.matches(".*\\b\\d{1,4}\\s*(ml|g)\\b.*")) score += 2;
+        if (lower.split("\\s+").length >= 3) score++;
+        return score;
     }
 
     private static boolean isDescription(String line) {
         if (line == null) return false;
         String s = line.trim();
         String lower = s.toLowerCase(Locale.ROOT);
-        if (s.length() < 4 || s.length() > 100) return false;
+        if (s.length() < 4 || s.length() > 110) return false;
         if (lower.startsWith("rituals") || lower.startsWith("art") || lower.startsWith("batch")
                 || lower.startsWith("made in") || lower.startsWith("lan") || lower.startsWith("ref")
-                || lower.startsWith("exp") || lower.startsWith("po code") || lower.contains("herengracht")
+                || lower.startsWith("exp") || lower.startsWith("po ") || lower.startsWith("content")
+                || lower.startsWith("count") || lower.startsWith("sscc") || lower.contains("herengracht")
                 || lower.contains("amsterdam") || lower.matches("^\\d+\\s*[x×X].*")) return false;
         int letters = 0;
         for (int i = 0; i < s.length(); i++) if (Character.isLetter(s.charAt(i))) letters++;
@@ -371,32 +474,85 @@ public final class OcrParser {
     }
 
     private static String cleanProduct(String s) {
-        return s.replaceAll("(?i)\\s+GS$", "")
+        if (s == null) return "";
+        return s.replaceAll("(?i)^rituals\\s*[.:_-]*\\s*", "")
+                .replaceAll("(?i)\\s+GS$", "")
                 .replaceAll("\\s{2,}", " ")
                 .trim();
     }
 
     private static void findPackageGtin(List<String> lines, OcrResult r) {
-        Pattern p = Pattern.compile("(?<!\\d)(\\d{13,14})(?!\\d)");
+        String unit = Gs1Utils.digitsOnly(r.unitEan);
         for (String line : lines) {
             String lower = line.toLowerCase(Locale.ROOT);
-            if (lower.contains("art") || lower.contains("batch") || lower.contains("ref") || lower.matches(".*\\d+\\s*[x×X].*")) continue;
-            Matcher m = p.matcher(line);
-            while (m.find()) {
-                String normalized = Gs1Utils.normalizeGtin14(m.group(1));
-                if (!normalized.isEmpty()) {
-                    r.packageGtin14 = normalized;
+            if (lower.contains("art") || lower.contains("batch") || lower.contains("ref")
+                    || lower.contains("lan") || lower.matches(".*\\d+\\s*[x×X].*")) continue;
+
+            if (isMostlyNumericHri(line)) {
+                String d = normalizeNumericToken(line);
+                if (d.length() == 13 && Gs1Utils.isValidGtin13(d) && !d.equals(unit)) {
+                    r.packageGtin14 = "0" + d;
+                    r.gtinSource = "OCR_PACKAGE_HRI";
+                    r.mark("gtin", OcrResult.Confidence.MEDIUM);
+                    return;
+                }
+                if (d.length() == 14 && Gs1Utils.isValidGtin14(d) && !d.equals(unit)) {
+                    r.packageGtin14 = d;
+                    r.gtinSource = "OCR_PACKAGE_HRI";
                     r.mark("gtin", OcrResult.Confidence.MEDIUM);
                     return;
                 }
             }
-            String digits = Gs1Utils.digitsOnly(line);
-            String normalized = Gs1Utils.normalizeGtin14(digits);
-            if (!normalized.isEmpty()) {
-                r.packageGtin14 = normalized;
-                r.mark("gtin", OcrResult.Confidence.MEDIUM);
-                return;
+
+            Matcher m = Pattern.compile("(?<!\\d)(\\d{13,14})(?!\\d)").matcher(line);
+            while (m.find()) {
+                String candidate = m.group(1);
+                String normalized = Gs1Utils.normalizeGtin14(candidate);
+                if (!normalized.isEmpty() && !candidate.equals(unit)) {
+                    r.packageGtin14 = normalized;
+                    r.gtinSource = "OCR_PACKAGE_HRI";
+                    r.mark("gtin", OcrResult.Confidence.MEDIUM);
+                    return;
+                }
             }
         }
+    }
+
+    private static boolean isMostlyNumericHri(String line) {
+        if (line == null || line.isEmpty()) return false;
+        int digitish = 0;
+        int otherLetters = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (Character.isDigit(c) || "OoQqDIiLl|SsBb".indexOf(c) >= 0) {
+                digitish++;
+            } else if (Character.isLetter(c)) {
+                otherLetters++;
+            }
+        }
+        return digitish >= 10 && otherLetters == 0;
+    }
+
+    private static String normalizeNumericToken(String raw) {
+        if (raw == null) return "";
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (Character.isDigit(c)) b.append(c);
+            else {
+                switch (c) {
+                    case 'O': case 'o': case 'Q': case 'q': case 'D': b.append('0'); break;
+                    case 'I': case 'i': case 'L': case 'l': case '|': b.append('1'); break;
+                    case 'S': case 's': b.append('5'); break;
+                    case 'B': case 'b': b.append('8'); break;
+                    default: break;
+                }
+            }
+        }
+        return b.toString();
+    }
+
+    private static void addIfNotEmpty(Set<String> set, String value) {
+        if (value != null && !value.isEmpty()) set.add(value);
     }
 }

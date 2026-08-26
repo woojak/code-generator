@@ -5,7 +5,12 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.ColorMatrix;
+import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -40,6 +45,7 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -78,6 +84,7 @@ public class MainActivity extends Activity {
     private static class ScanSession {
         int pending = 2;
         String text = "";
+        String enhancedText = "";
         List<String> barcodeValues = new ArrayList<>();
     }
 
@@ -85,7 +92,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        migrateTo121();
+        migrateTo130();
         textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         BarcodeScannerOptions options = new BarcodeScannerOptions.Builder()
                 .setBarcodeFormats(Barcode.FORMAT_CODE_128, Barcode.FORMAT_ITF, Barcode.FORMAT_EAN_13,
@@ -96,7 +103,7 @@ public class MainActivity extends Activity {
         loadForm();
         updateTotal();
         updateOutputTemplateUi();
-        generatePreview(false);
+        if (preview != null) preview.setImageDrawable(null);
     }
 
     private View buildUi() {
@@ -118,7 +125,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView version = new TextView(this);
-        version.setText("v1.2.1 • safe scan reset • multi-OCR • offline");
+        version.setText("v1.3.0 • brown OCR+ • safe GS1 • offline");
         version.setTextSize(13);
         version.setTextColor(Color.rgb(90, 90, 90));
         version.setPadding(0, dp(2), 0, dp(8));
@@ -157,7 +164,7 @@ public class MainActivity extends Activity {
         root.addView(scanCard, marginTop(matchWrap(), gap));
 
         LinearLayout productCard = card("2. Dane produktu", "Po skanie najpierw zobaczysz ekran weryfikacji. Dane trafiają tutaj dopiero po wybraniu „Użyj tych danych”.");
-        productEdit = field(productCard, "Nazwa produktu / materiał", "RC SCRUB YOZAKURA", false);
+        productEdit = field(productCard, "Nazwa produktu / materiał", "", false);
         productEdit.setSingleLine(false);
         productEdit.setMaxLines(2);
         descriptionEdit = field(productCard, "Opis produktu", "", false);
@@ -167,19 +174,19 @@ public class MainActivity extends Activity {
         LinearLayout artRow = horizontal();
         LinearLayout tuCol = verticalWeight();
         tuCol.addView(smallLabel("Article TU"));
-        articleTuEdit = edit("1120211", true);
+        articleTuEdit = edit("", true);
         tuCol.addView(articleTuEdit, matchWrap());
         LinearLayout cuCol = verticalWeight();
         cuCol.addView(smallLabel("Article CU"));
-        articleCuEdit = edit("1120211", true);
+        articleCuEdit = edit("", true);
         cuCol.addView(articleCuEdit, matchWrap());
         artRow.addView(tuCol, weight());
         artRow.addView(cuCol, weightMargin());
         productCard.addView(artRow);
 
-        piecesEdit = field(productCard, "Sztuk / karton", "60", true);
-        batchEdit = field(productCard, "Batch / Lot", "12342064", false);
-        gtinEdit = field(productCard, "CONTENT / GTIN-14", "08720296062361", true);
+        piecesEdit = field(productCard, "Sztuk / karton", "", true);
+        batchEdit = field(productCard, "Batch / Lot", "", false);
+        gtinEdit = field(productCard, "CONTENT / GTIN-14", "", true);
         madeInEdit = field(productCard, "Made in", "", false);
 
         advancedToggle = secondaryButton("Pokaż pola dodatkowe");
@@ -188,10 +195,10 @@ public class MainActivity extends Activity {
         advancedContainer.setOrientation(LinearLayout.VERTICAL);
         advancedContainer.setVisibility(View.GONE);
         poCodeEdit = field(advancedContainer, "PO code (Semifinished)", "", false);
-        packArticleEdit = field(advancedContainer, "Linia opakowanie / artykuł", "125G1120211", false);
-        referenceEdit = field(advancedContainer, "REF / numer góra lewa", "1501333", false);
-        topRightSmallEdit = field(advancedContainer, "Pole prawe małe", "NLVL", false);
-        routeEdit = field(advancedContainer, "Pole prawe duże", "91/NR", false);
+        packArticleEdit = field(advancedContainer, "Linia opakowanie / artykuł", "", false);
+        referenceEdit = field(advancedContainer, "REF / numer góra lewa", "", false);
+        topRightSmallEdit = field(advancedContainer, "Pole prawe małe", "", false);
+        routeEdit = field(advancedContainer, "Pole prawe duże", "", false);
         productCard.addView(advancedContainer);
         advancedToggle.setOnClickListener(v -> {
             boolean open = advancedContainer.getVisibility() == View.VISIBLE;
@@ -217,7 +224,7 @@ public class MainActivity extends Activity {
         attachTotalWatcher(cartonsEdit);
         attachTotalWatcher(piecesEdit);
 
-        expiryEdit = field(palletCard, "Expiry dla GS1 (DD/MM/YY)", defaultExpiry(), false);
+        expiryEdit = field(palletCard, "Expiry dla GS1 (DD/MM/YY)", "", false);
         Button plusTwo = secondaryButton("Ustaw dziś + 2 lata");
         plusTwo.setOnClickListener(v -> expiryEdit.setText(defaultExpiry()));
         palletCard.addView(plusTwo);
@@ -448,41 +455,132 @@ public class MainActivity extends Activity {
     }
 
     private void analyzeImage(Uri uri) {
-        photoStatus.setText("Analizuję: OCR + barcode...");
+        String forcedMode = scanModeSpinner.getSelectedItem().toString();
+        boolean brownEnhancement = "RITUALS BROWN".equals(forcedMode);
+        photoStatus.setText(brownEnhancement
+                ? "Analizuję: OCR + wzmocniony OCR dla brązowego kartonu + barcode..."
+                : "Analizuję: OCR + barcode...");
         try {
             InputImage image = InputImage.fromFilePath(this, uri);
             ScanSession session = new ScanSession();
+            session.pending = brownEnhancement ? 3 : 2;
+
             textRecognizer.process(image)
-                    .addOnSuccessListener(text -> { session.text = text.getText(); lastOcrText = session.text; scanPartDone(session); })
-                    .addOnFailureListener(e -> { session.text = ""; scanPartDone(session); });
-            barcodeScanner.process(image)
-                    .addOnSuccessListener(codes -> {
-                        for (Barcode b : codes) if (b.getRawValue() != null) session.barcodeValues.add(b.getRawValue());
+                    .addOnSuccessListener(text -> {
+                        session.text = text.getText();
                         scanPartDone(session);
                     })
                     .addOnFailureListener(e -> scanPartDone(session));
-        } catch (Exception e) { photoStatus.setText("Błąd analizy zdjęcia: " + e.getMessage()); }
+
+            barcodeScanner.process(image)
+                    .addOnSuccessListener(codes -> {
+                        for (Barcode b : codes) {
+                            if (b.getRawValue() != null) session.barcodeValues.add(b.getRawValue());
+                        }
+                        scanPartDone(session);
+                    })
+                    .addOnFailureListener(e -> scanPartDone(session));
+
+            if (brownEnhancement) {
+                Bitmap enhanced = buildEnhancedOcrBitmap(uri);
+                if (enhanced == null) {
+                    scanPartDone(session);
+                } else {
+                    InputImage enhancedImage = InputImage.fromBitmap(enhanced, 0);
+                    textRecognizer.process(enhancedImage)
+                            .addOnSuccessListener(text -> session.enhancedText = text.getText())
+                            .addOnCompleteListener(task -> {
+                                try { enhanced.recycle(); } catch (Exception ignored) {}
+                                scanPartDone(session);
+                            });
+                }
+            }
+        } catch (Exception e) {
+            photoStatus.setText("Błąd analizy zdjęcia: " + e.getMessage());
+        }
+    }
+
+    private Bitmap buildEnhancedOcrBitmap(Uri uri) {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) return null;
+            Bitmap src = BitmapFactory.decodeStream(in);
+            if (src == null) return null;
+
+            int maxSide = 2000;
+            float scale = Math.min(1f, maxSide / (float) Math.max(src.getWidth(), src.getHeight()));
+            Bitmap base = src;
+            if (scale < 1f) {
+                int w = Math.max(1, Math.round(src.getWidth() * scale));
+                int h = Math.max(1, Math.round(src.getHeight() * scale));
+                base = Bitmap.createScaledBitmap(src, w, h, true);
+            }
+
+            Bitmap out = Bitmap.createBitmap(base.getWidth(), base.getHeight(), Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(out);
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+
+            ColorMatrix gray = new ColorMatrix();
+            gray.setSaturation(0f);
+            ColorMatrix contrast = new ColorMatrix(new float[]{
+                    1.75f, 0, 0, 0, -82f,
+                    0, 1.75f, 0, 0, -82f,
+                    0, 0, 1.75f, 0, -82f,
+                    0, 0, 0, 1f, 0
+            });
+            gray.postConcat(contrast);
+            paint.setColorFilter(new ColorMatrixColorFilter(gray));
+            canvas.drawBitmap(base, 0, 0, paint);
+
+            if (base != src) base.recycle();
+            src.recycle();
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private synchronized void scanPartDone(ScanSession session) {
         session.pending--;
         if (session.pending != 0) return;
+
+        StringBuilder merged = new StringBuilder();
+        if (session.text != null && !session.text.trim().isEmpty()) merged.append(session.text.trim());
+        if (session.enhancedText != null && !session.enhancedText.trim().isEmpty()) {
+            if (merged.length() > 0) merged.append("\n");
+            merged.append(session.enhancedText.trim());
+        }
+        lastOcrText = merged.toString();
+
         String forced = scanModeSpinner.getSelectedItem().toString();
-        OcrResult result = OcrParser.parse(session.text, forced);
+        OcrResult result = OcrParser.parse(lastOcrText, forced);
         OcrParser.applyBarcodeValues(result, session.barcodeValues);
         enrichFromCache(result);
         showVerification(result);
     }
 
     private void enrichFromCache(OcrResult r) {
-        if (r.article.isEmpty()) return;
-        String prefix = "cache_v2_" + r.article + "_";
-        if (r.productName.isEmpty()) r.productName = prefs.getString(prefix + "product", "");
-        if (r.description.isEmpty()) r.description = prefs.getString(prefix + "description", "");
-        if (r.packageGtin14.isEmpty()) r.packageGtin14 = prefs.getString(prefix + "gtin", "");
-        if (r.piecesPerCarton.isEmpty()) r.piecesPerCarton = prefs.getString(prefix + "pieces", "");
-        if (r.madeIn.isEmpty()) r.madeIn = prefs.getString(prefix + "madeIn", "");
-        if (!r.productName.isEmpty()) r.cacheUsed = true;
+        if (r.article == null || r.article.isEmpty()) return;
+        String prefix = "cache_v3_" + r.article + "_";
+        boolean used = false;
+
+        String value;
+        if (r.productName.isEmpty()) {
+            value = prefs.getString(prefix + "product", "");
+            if (!value.isEmpty()) { r.productName = value; used = true; }
+        }
+        if (r.description.isEmpty()) {
+            value = prefs.getString(prefix + "description", "");
+            if (!value.isEmpty()) { r.description = value; used = true; }
+        }
+        if (r.piecesPerCarton.isEmpty()) {
+            value = prefs.getString(prefix + "pieces", "");
+            if (!value.isEmpty()) { r.piecesPerCarton = value; used = true; }
+        }
+        if (r.madeIn.isEmpty()) {
+            value = prefs.getString(prefix + "madeIn", "");
+            if (!value.isEmpty()) { r.madeIn = value; used = true; }
+        }
+        r.cacheUsed = used;
     }
 
     private void showVerification(OcrResult r) {
@@ -495,12 +593,15 @@ public class MainActivity extends Activity {
         addSummary(sb, "Article CU", r.articleCu, r.confidenceOf("article"));
         addSummary(sb, "Batch", r.batch, r.confidenceOf("batch"));
         addSummary(sb, "Szt./karton", r.piecesPerCarton, r.confidenceOf("pieces"));
-        addSummary(sb, "GTIN-14", r.packageGtin14, r.confidenceOf("gtin"));
+        addSummary(sb, "EAN produktu", r.unitEan, r.confidenceOf("pieces"));
+        addSummary(sb, "GTIN-14 kartonu", r.packageGtin14, r.confidenceOf("gtin"));
+        if (!r.gtinSource.isEmpty()) sb.append("   źródło GTIN: ").append(gtinSourceLabel(r.gtinSource)).append("\n");
         addSummary(sb, "Made in", r.madeIn, r.confidenceOf("madeIn"));
         addSummary(sb, "EXP z kartonu", r.expiryRaw, r.confidenceOf("expiry"));
         addSummary(sb, "ARTICLE logistics", r.logisticsArticle, r.confidenceOf("article"));
         addSummary(sb, "PO code", r.poCode, r.confidenceOf("po"));
-        if (r.cacheUsed) sb.append("\nℹ Część brakujących danych uzupełniono z historii tego Article.");
+        if (r.cacheUsed) sb.append("\nℹ Część bezpiecznych danych produktu uzupełniono z historii tego Article.");
+        for (String warning : r.warnings) sb.append("\n⚠ ").append(warning);
         if (!r.hasAnyData()) sb.append("\n⚠ Nie znaleziono pewnych danych. Możesz anulować i poprawić zdjęcie.");
 
         new AlertDialog.Builder(this)
@@ -517,22 +618,33 @@ public class MainActivity extends Activity {
         sb.append(icon).append(" ").append(label).append(": ").append(value).append("\n");
     }
 
+    private String gtinSourceLabel(String source) {
+        if (source == null) return "";
+        switch (source) {
+            case "BARCODE_14": return "zeskanowany kod 14-cyfrowy";
+            case "BARCODE_13_PACKAGE": return "zeskanowany kod kartonu EAN-13";
+            case "OCR_PACKAGE_HRI": return "cyfry pod kodem kartonu odczytane przez OCR";
+            case "LOGISTICS_CONTENT": return "pole CONTENT z etykiety logistycznej";
+            case "UNIT_EAN_DERIVED": return "UWAGA: przeliczone z EAN produktu";
+            default: return source;
+        }
+    }
+
     private void applyOcrResult(OcrResult r) {
-        // v1.2.1: a confirmed scan starts a NEW product dataset.
-        // Never mix missing OCR fields with values from the previous carton.
         clearProductSpecificFieldsForNewScan();
 
         productEdit.setText(r.productName);
         descriptionEdit.setText(r.description);
 
-        String resolvedTu = r.articleTu;
-        String resolvedCu = r.articleCu;
-        if (resolvedTu.isEmpty() && resolvedCu.isEmpty() && !r.article.isEmpty()) {
-            resolvedTu = r.article;
-            resolvedCu = r.article;
+        String resolvedTu = r.articleTu == null ? "" : r.articleTu;
+        String resolvedCu = r.articleCu == null ? "" : r.articleCu;
+        String currentArticle = r.article == null ? "" : r.article;
+        if (resolvedTu.isEmpty() && resolvedCu.isEmpty() && !currentArticle.isEmpty()) {
+            resolvedTu = currentArticle;
+            resolvedCu = currentArticle;
         } else {
-            if (resolvedTu.isEmpty() && !r.article.isEmpty()) resolvedTu = r.article;
-            if (resolvedCu.isEmpty() && !r.article.isEmpty()) resolvedCu = r.article;
+            if (resolvedTu.isEmpty() && !currentArticle.isEmpty()) resolvedTu = currentArticle;
+            if (resolvedCu.isEmpty() && !currentArticle.isEmpty()) resolvedCu = currentArticle;
         }
         articleTuEdit.setText(resolvedTu);
         articleCuEdit.setText(resolvedCu);
@@ -551,29 +663,30 @@ public class MainActivity extends Activity {
         customerSkuEdit.setText(r.customerSku);
         logisticsArticleEdit.setText(r.logisticsArticle);
 
-        // Apply OCR expiry only when it contains an unambiguous full date.
-        // YYYY/MM is intentionally NOT guessed.
         String parsedExpiry = normalizeOcrExpiry(r.expiryRaw);
-        if (!parsedExpiry.isEmpty()) expiryEdit.setText(parsedExpiry);
+        expiryEdit.setText(parsedExpiry);
 
-        String mainArticle = mainArticle();
-        String autoPack = buildPackArticleLine(productEdit.getText().toString(), mainArticle);
-        packArticleEdit.setText(autoPack);
+        packArticleEdit.setText("");
+        referenceEdit.setText("");
+        topRightSmallEdit.setText("");
+        routeEdit.setText("");
 
-        if (r.detectedType.equals("PALLET LOGISTICS")) {
+        if ("PALLET LOGISTICS".equals(r.detectedType)) {
+            String mainArticle = mainArticle();
             if (customerSkuEdit.getText().toString().trim().isEmpty()) customerSkuEdit.setText(mainArticle);
             if (materialEdit.getText().toString().trim().isEmpty()) materialEdit.setText(productEdit.getText().toString());
         }
 
-        // Do not leave a preview/PDF from the previous product visible when
-        // the new scan is incomplete and cannot yet generate a valid label.
         preview.setImageDrawable(null);
         pendingPdf = null;
         if (gs1Status != null) gs1Status.setText("");
 
-        photoStatus.setText("Dane z nowego skanu zastosowane. Brakujące pola pozostawiono puste — nie użyto danych z poprzedniego kartonu.");
+        String status = "Dane z nowego skanu zastosowane. Brakujące pola pozostawiono puste.";
+        if (!r.warnings.isEmpty()) status += " Sprawdź ostrzeżenia w oknie OCR.";
+        photoStatus.setText(status);
+
         saveForm();
-        if (!mainArticle.isEmpty()) saveProductCache();
+        if (!mainArticle().isEmpty()) saveProductCache();
         updateTotal();
         generatePreview(false);
     }
@@ -587,10 +700,13 @@ public class MainActivity extends Activity {
         batchEdit.setText("");
         gtinEdit.setText("");
         madeInEdit.setText("");
+        expiryEdit.setText("");
         poCodeEdit.setText("");
         packArticleEdit.setText("");
+        referenceEdit.setText("");
+        topRightSmallEdit.setText("");
+        routeEdit.setText("");
 
-        // Hidden logistics fields are also product-specific.
         logisticsArticleEdit.setText("");
         materialEdit.setText("");
         customerSkuEdit.setText("");
@@ -674,14 +790,22 @@ public class MainActivity extends Activity {
         if (d.article.isEmpty() || d.article.length() > 30) throw new Exception("Article TU/CU jest wymagany.");
         if (!asciiOnly(d.batch) || !asciiOnly(d.article)) throw new Exception("Batch i Article muszą używać znaków ASCII.");
         if (!Gs1Utils.isValidSscc(d.sscc)) throw new Exception("SSCC musi mieć 18 cyfr i prawidłową cyfrę kontrolną.");
-        try {
-            LocalDate date = LocalDate.parse(d.expiryDisplay, DateTimeFormatter.ofPattern("dd/MM/yy", Locale.US));
-            d.expiryAi = date.format(DateTimeFormatter.ofPattern("yyMMdd", Locale.US));
-        } catch (DateTimeParseException e) { throw new Exception("Expiry wpisz jako DD/MM/YY, np. 25/08/28."); }
+        if (d.expiryDisplay.isEmpty()) {
+            d.expiryAi = "";
+        } else {
+            try {
+                LocalDate date = LocalDate.parse(d.expiryDisplay, DateTimeFormatter.ofPattern("dd/MM/yy", Locale.US));
+                d.expiryAi = date.format(DateTimeFormatter.ofPattern("yyMMdd", Locale.US));
+            } catch (DateTimeParseException e) {
+                throw new Exception("Expiry zostaw puste albo wpisz DD/MM/YY, np. 25/08/28.");
+            }
+        }
         if (isLogistics()) {
             if (d.customerSku.isEmpty()) d.customerSku = d.article;
             if (d.material.isEmpty()) d.material = d.productLine;
             if (d.grossWeight.isEmpty()) throw new Exception("Dla Logistics wpisz brutto pallet weight.");
+            try { Gs1Utils.grossWeightAi3302(d.grossWeight); }
+            catch (IllegalArgumentException e) { throw new Exception(e.getMessage()); }
         }
         return d;
     }
@@ -696,8 +820,9 @@ public class MainActivity extends Activity {
             Bitmap bmp = isLogistics() ? LogisticsLabelRenderer.renderPreview(d) : LabelRenderer.renderPreview(d);
             preview.setImageBitmap(bmp);
             if (isLogistics()) {
-                gs1Status.setText("LOGISTICS GS1-128:\n(02)" + d.contentGtin + "(17)" + d.expiryAi + "(37)" + d.cartons + "(10)" + d.batch
-                        + "\n(00)" + d.sscc + "(3302)[waga]\n2D: " + (d.dataMatrixPayload.isEmpty() ? "nie ustawiono payloadu" : "payload ręczny"));
+                gs1Status.setText("LOGISTICS GS1-128:\n" + d.barcode1Human() + "(10)" + d.batch
+                        + "\n(00)" + d.sscc + "(3302)" + Gs1Utils.grossWeightAi3302(d.grossWeight)
+                        + "\n2D: " + (d.dataMatrixPayload.isEmpty() ? "nie ustawiono payloadu" : "payload ręczny"));
             } else {
                 gs1Status.setText("GS1-128:\n" + d.barcode1Human() + "\n" + d.barcode2Human() + " [FNC1 po Batch]\n" + d.barcode3Human()
                         + "\n\nRazem: " + d.totalPieces() + " szt.");
@@ -744,9 +869,13 @@ public class MainActivity extends Activity {
     private void saveProductCache() {
         String article = mainArticle();
         if (article.isEmpty()) return;
-        String prefix = "cache_v2_" + article + "_";
-        prefs.edit().putString(prefix + "product", clean(productEdit)).putString(prefix + "description", clean(descriptionEdit))
-                .putString(prefix + "gtin", clean(gtinEdit)).putString(prefix + "pieces", clean(piecesEdit)).putString(prefix + "madeIn", clean(madeInEdit)).apply();
+        String prefix = "cache_v3_" + article + "_";
+        prefs.edit()
+                .putString(prefix + "product", clean(productEdit))
+                .putString(prefix + "description", clean(descriptionEdit))
+                .putString(prefix + "pieces", clean(piecesEdit))
+                .putString(prefix + "madeIn", clean(madeInEdit))
+                .apply();
     }
 
     private void saveForm() {
@@ -766,12 +895,9 @@ public class MainActivity extends Activity {
                 .apply();
     }
 
-    private void migrateTo121() {
-        if (prefs.getInt("dataModelVersion", 0) >= 121) return;
+    private void migrateTo130() {
+        if (prefs.getInt("dataModelVersion", 0) >= 130) return;
 
-        // v1.2 could save a mixed product when OCR missed Article/name.
-        // Clear only product-specific current-form data once.
-        // Pallet settings (COUNT, expiry, SSCC) and template constants stay.
         prefs.edit()
                 .putString("product", "")
                 .putString("description", "")
@@ -781,14 +907,18 @@ public class MainActivity extends Activity {
                 .putString("batch", "")
                 .putString("gtin", "")
                 .putString("madeIn", "")
+                .putString("expiry", "")
                 .putString("poCode", "")
                 .putString("pack", "")
+                .putString("reference", "")
+                .putString("topRightSmall", "")
+                .putString("route", "")
                 .putString("logArticle", "")
                 .putString("material", "")
                 .putString("customerSku", "")
                 .putString("grossWeight", "")
                 .putString("dataMatrix", "")
-                .putInt("dataModelVersion", 121)
+                .putInt("dataModelVersion", 130)
                 .apply();
     }
 
@@ -802,13 +932,13 @@ public class MainActivity extends Activity {
         gtinEdit.setText(prefs.getString("gtin", ""));
         madeInEdit.setText(prefs.getString("madeIn", ""));
         cartonsEdit.setText(prefs.getString("cartons", "16"));
-        expiryEdit.setText(prefs.getString("expiry", defaultExpiry()));
+        expiryEdit.setText(prefs.getString("expiry", ""));
         ssccEdit.setText(prefs.getString("sscc", DEFAULT_OLD_SSCC));
         poCodeEdit.setText(prefs.getString("poCode", ""));
         packArticleEdit.setText(prefs.getString("pack", ""));
-        referenceEdit.setText(prefs.getString("reference", "1501333"));
-        topRightSmallEdit.setText(prefs.getString("topRightSmall", "NLVL"));
-        routeEdit.setText(prefs.getString("route", "91/NR"));
+        referenceEdit.setText(prefs.getString("reference", ""));
+        topRightSmallEdit.setText(prefs.getString("topRightSmall", ""));
+        routeEdit.setText(prefs.getString("route", ""));
         logisticsArticleEdit.setText(prefs.getString("logArticle", ""));
         materialEdit.setText(prefs.getString("material", ""));
         customerSkuEdit.setText(prefs.getString("customerSku", ""));

@@ -86,11 +86,10 @@ public final class LogisticsLabelRenderer {
         text(c, p, "BRUTTO PALLET WEIGHT", 70, 85, 2.3f, sx, sy, true);
         text(c, p, d.grossWeight, 76, 92, 4.0f, sx, sy, false);
 
-        String raw1 = "02" + d.contentGtin + "17" + d.expiryAi + "37" + d.cartons + "10" + d.batch;
+        String raw1 = "02" + d.contentGtin + (d.expiryAi.isEmpty() ? "" : "17" + d.expiryAi) + "37" + d.cartons + "10" + d.batch;
         String raw2 = "00" + d.sscc + "3302" + grossAi3302(d.grossWeight);
         LabelRenderer.drawBarcode(c, raw1, 8, 98, 82, 15, sx, sy);
-        text(c, p, "(02)" + d.contentGtin + "(17)" + d.expiryAi + "(37)" + d.cartons + "(10)" + d.batch,
-                28, 116, 2.2f, sx, sy, true);
+        text(c, p, d.barcode1Human() + "(10)" + d.batch, 28, 116, 2.2f, sx, sy, true);
         LabelRenderer.drawBarcode(c, raw2, 8, 121, 82, 15, sx, sy);
         text(c, p, "(00)" + d.sscc + "(3302)" + grossAi3302(d.grossWeight), 38, 139, 2.2f, sx, sy, true);
 
@@ -121,13 +120,7 @@ public final class LogisticsLabelRenderer {
     }
 
     private static String grossAi3302(String weight) {
-        try {
-            double v = Double.parseDouble(weight.replace(',', '.').trim());
-            long scaled = Math.round(v * 100.0);
-            return String.format(Locale.US, "%06d", scaled);
-        } catch (Exception e) {
-            return "000000";
-        }
+        return Gs1Utils.grossWeightAi3302(weight);
     }
 
     private static void fit(Canvas c, Paint p, String s, float x, float y, float maxW,

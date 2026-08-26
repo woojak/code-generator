@@ -1,25 +1,24 @@
 package com.labeltools.palletlabel;
 
 public class LabelData {
-    public String reference = "1501333";
-    public String topRightSmall = "NLVL";
-    public String topRightLarge = "91/NR";
-    public String productLine = "RC SCRUB YOZAKURA";
+    public String reference = "";
+    public String topRightSmall = "";
+    public String topRightLarge = "";
+    public String productLine = "";
     public String description = "";
-    public String packArticleLine = "125G1120211";
+    public String packArticleLine = "";
     public String madeIn = "";
-    public String contentGtin = "08720296062361";
+    public String contentGtin = "";
     public int cartons = 16;
-    public int piecesPerCarton = 60;
-    public String expiryDisplay = "25/08/28";
-    public String expiryAi = "280825";
-    public String batch = "12342064";
-    public String article = "1120211";
-    public String articleTu = "1120211";
-    public String articleCu = "1120211";
-    public String sscc = "087109190015360952";
+    public int piecesPerCarton = 0;
+    public String expiryDisplay = "";
+    public String expiryAi = "";
+    public String batch = "";
+    public String article = "";
+    public String articleTu = "";
+    public String articleCu = "";
+    public String sscc = "";
 
-    // Logistics template fields.
     public String logisticsArticle = "";
     public String material = "";
     public String customerSku = "";
@@ -37,7 +36,10 @@ public class LabelData {
     }
 
     public String barcode1Human() {
-        return "(02)" + contentGtin + "(17)" + expiryAi + "(37)" + cartons;
+        StringBuilder s = new StringBuilder("(02)").append(contentGtin);
+        if (expiryAi != null && !expiryAi.isEmpty()) s.append("(17)").append(expiryAi);
+        s.append("(37)").append(cartons);
+        return s.toString();
     }
 
     public String barcode2Human() {

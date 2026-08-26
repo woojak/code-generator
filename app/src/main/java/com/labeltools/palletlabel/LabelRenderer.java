@@ -79,7 +79,7 @@ public final class LabelRenderer {
         text(c, p, Gs1Utils.spacedSscc(d.sscc), 3f, 72f, 4.7f, sx, sy, false);
         line(c, p, 2.5f, 74.2f, 102.5f, 74.2f, 0.22f, sx, sy);
 
-        String raw1 = "02" + d.contentGtin + "17" + d.expiryAi + "37" + d.cartons;
+        String raw1 = "02" + d.contentGtin + (d.expiryAi.isEmpty() ? "" : "17" + d.expiryAi) + "37" + d.cartons;
         String raw2 = "10" + d.batch + FNC1 + "240" + d.article;
         String raw3 = "00" + d.sscc;
 

@@ -51,11 +51,26 @@ public final class OcrParser {
 
     public static void applyBarcodeValues(OcrResult r, List<String> rawValues) {
         if (rawValues == null) return;
+
+        // Prefer a real 14-digit package GTIN over an EAN-13 from the unit.
+        // This prevents a scanned unit EAN from overwriting a package GTIN
+        // already read from the carton text/barcode.
+        for (String raw : rawValues) {
+            String digits = Gs1Utils.digitsOnly(raw);
+            if (digits.length() == 14 && Gs1Utils.isValidGtin14(digits)) {
+                r.packageGtin14 = digits;
+                r.mark("gtin", OcrResult.Confidence.HIGH);
+                return;
+            }
+        }
+
+        // A 13-digit code is only a fallback when no package GTIN was found.
+        if (!r.packageGtin14.isEmpty()) return;
         for (String raw : rawValues) {
             String normalized = Gs1Utils.normalizeGtin14(raw);
             if (!normalized.isEmpty()) {
                 r.packageGtin14 = normalized;
-                r.mark("gtin", OcrResult.Confidence.HIGH);
+                r.mark("gtin", OcrResult.Confidence.MEDIUM);
                 return;
             }
         }
@@ -76,37 +91,121 @@ public final class OcrParser {
     }
 
     private static void parseArticles(List<String> lines, OcrResult r) {
-        Pattern p = Pattern.compile("(?i)art\\s*\\.?\\s*nr\\s*\\.?\\s*(tu|cu)\\s*[:.\\-]?\\s*(\\d{5,12})");
-        Pattern reversed = Pattern.compile("(?i)\\b(tu|cu)\\s+art\\s*\\.?\\s*nr\\s*\\.?\\s*[:.\\-]?\\s*(\\d{5,12})");
-        for (String line : lines) {
-            Matcher m = p.matcher(line);
-            if (!m.find()) m = reversed.matcher(line);
-            if (m.find(0)) {
-                String kind = m.group(1).toUpperCase(Locale.ROOT);
-                String value = m.group(2);
-                if (kind.equals("TU")) r.articleTu = value; else r.articleCu = value;
+        Pattern inline = Pattern.compile(
+                "(?i)art\s*\.?\s*nr\s*\.?\s*(tu\s*/\s*cu|cu\s*/\s*tu|tu|cu)\s*[:.\-]?\s*(\d{5,12})");
+        Pattern reversed = Pattern.compile(
+                "(?i)\b(tu\s*/\s*cu|cu\s*/\s*tu|tu|cu)\s+art\s*\.?\s*nr\s*\.?\s*[:.\-]?\s*(\d{5,12})");
+        Pattern labelOnly = Pattern.compile(
+                "(?i)^.*art\s*\.?\s*nr\s*\.?\s*(tu\s*/\s*cu|cu\s*/\s*tu|tu|cu)\s*[:.\-]?\s*$");
+        Pattern valueOnly = Pattern.compile("^\d{5,12}$");
+
+        for (int i = 0; i < lines.size(); i++) {
+            String line = lines.get(i);
+            String kind = "";
+            String value = "";
+
+            Matcher m = inline.matcher(line);
+            if (m.find()) {
+                kind = m.group(1);
+                value = m.group(2);
+            } else {
+                m = reversed.matcher(line);
+                if (m.find()) {
+                    kind = m.group(1);
+                    value = m.group(2);
+                } else {
+                    m = labelOnly.matcher(line);
+                    if (m.matches() && i + 1 < lines.size()) {
+                        Matcher next = valueOnly.matcher(lines.get(i + 1).trim());
+                        if (next.matches()) {
+                            kind = m.group(1);
+                            value = next.group();
+                        }
+                    }
+                }
+            }
+
+            if (!value.isEmpty()) {
+                applyArticleValue(r, kind, value);
                 r.mark("article", OcrResult.Confidence.HIGH);
             }
         }
+
         if (!r.articleCu.isEmpty()) r.article = r.articleCu;
         else if (!r.articleTu.isEmpty()) r.article = r.articleTu;
     }
 
+    private static void applyArticleValue(OcrResult r, String kindRaw, String value) {
+        String kind = kindRaw.toUpperCase(Locale.ROOT).replaceAll("\s+", "");
+        if (kind.contains("/")) {
+            r.articleTu = value;
+            r.articleCu = value;
+        } else if (kind.equals("TU")) {
+            r.articleTu = value;
+        } else if (kind.equals("CU")) {
+            r.articleCu = value;
+        }
+    }
+
     private static void parseBatch(List<String> lines, OcrResult r) {
-        Pattern p = Pattern.compile("(?i)^.*?\\bbatch\\s*(?:code|/\\s*lot)?\\s*[:.\\-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\s*$");
-        Pattern lot = Pattern.compile("(?i)^.*?\\blot\\s*[:.\\-]?\\s*([A-Z0-9][A-Z0-9-]{2,19})\\s*$");
-        for (String line : lines) {
-            Matcher m = p.matcher(line);
+        Pattern inline = Pattern.compile(
+                "(?i)^.*?\bbatch\s*(?:code|/\s*lot)?\s*[:.\-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\s*$");
+        Pattern lot = Pattern.compile(
+                "(?i)^.*?\blot\s*[:.\-]?\s*([A-Z0-9][A-Z0-9-]{2,19})\s*$");
+        Pattern labelOnly = Pattern.compile(
+                "(?i)^.*?\b(?:batch(?:\s*code|\s*/\s*lot)?|lot)\s*[:.\-]?\s*$");
+        Pattern token = Pattern.compile("(?i)^[A-Z0-9][A-Z0-9-]{2,19}$");
+
+        for (int i = 0; i < lines.size(); i++) {
+            String line = lines.get(i);
+            Matcher m = inline.matcher(line);
             if (!m.matches()) m = lot.matcher(line);
+
             if (m.matches()) {
                 String value = m.group(1).trim();
-                if (!value.equalsIgnoreCase("RITUALS") && !value.equalsIgnoreCase("CODE")) {
+                if (isUsableBatch(value)) {
+                    r.batch = value;
+                    r.mark("batch", OcrResult.Confidence.HIGH);
+                    return;
+                }
+            }
+
+            // OCR often puts "Batch" and the value on separate lines.
+            if (labelOnly.matcher(line).matches() && i + 1 < lines.size()) {
+                String value = lines.get(i + 1).trim();
+                if (token.matcher(value).matches() && isUsableBatch(value)) {
                     r.batch = value;
                     r.mark("batch", OcrResult.Confidence.HIGH);
                     return;
                 }
             }
         }
+
+        // Semifinished labels sometimes expose a short alphanumeric batch
+        // such as AM26/FYR628 without a clean "Batch:" line.
+        if (r.detectedType.equals("SEMIFINISHED")) {
+            Pattern semiBatch = Pattern.compile("(?i)^(?:[A-Z]{1,6}\d{2,8}|\d{2,8}[A-Z]{1,6})$");
+            for (String line : lines) {
+                String value = line.trim();
+                if (semiBatch.matcher(value).matches() && isUsableBatch(value)) {
+                    r.batch = value;
+                    r.mark("batch", OcrResult.Confidence.MEDIUM);
+                    return;
+                }
+            }
+        }
+    }
+
+    private static boolean isUsableBatch(String value) {
+        if (value == null) return false;
+        String v = value.trim();
+        if (v.length() < 3 || v.length() > 20) return false;
+        String u = v.toUpperCase(Locale.ROOT);
+        return !u.equals("RITUALS")
+                && !u.equals("CODE")
+                && !u.equals("BATCH")
+                && !u.equals("LOT")
+                && !u.equals("SEMIFINISHED");
     }
 
     private static void parseQuantityAndEan(List<String> lines, OcrResult r) {

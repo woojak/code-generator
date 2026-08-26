@@ -85,6 +85,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        migrateTo121();
         textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         BarcodeScannerOptions options = new BarcodeScannerOptions.Builder()
                 .setBarcodeFormats(Barcode.FORMAT_CODE_128, Barcode.FORMAT_ITF, Barcode.FORMAT_EAN_13,
@@ -117,7 +118,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView version = new TextView(this);
-        version.setText("v1.2 • multi-OCR • 2 szablony PDF • offline");
+        version.setText("v1.2.1 • safe scan reset • multi-OCR • offline");
         version.setTextSize(13);
         version.setTextColor(Color.rgb(90, 90, 90));
         version.setPadding(0, dp(2), 0, dp(8));
@@ -475,7 +476,7 @@ public class MainActivity extends Activity {
 
     private void enrichFromCache(OcrResult r) {
         if (r.article.isEmpty()) return;
-        String prefix = "cache_" + r.article + "_";
+        String prefix = "cache_v2_" + r.article + "_";
         if (r.productName.isEmpty()) r.productName = prefs.getString(prefix + "product", "");
         if (r.description.isEmpty()) r.description = prefs.getString(prefix + "description", "");
         if (r.packageGtin14.isEmpty()) r.packageGtin14 = prefs.getString(prefix + "gtin", "");
@@ -517,34 +518,100 @@ public class MainActivity extends Activity {
     }
 
     private void applyOcrResult(OcrResult r) {
-        if (!r.productName.isEmpty()) productEdit.setText(r.productName);
-        if (!r.description.isEmpty()) descriptionEdit.setText(r.description);
-        if (!r.articleTu.isEmpty()) articleTuEdit.setText(r.articleTu);
-        if (!r.articleCu.isEmpty()) articleCuEdit.setText(r.articleCu);
-        if (!r.article.isEmpty()) {
-            if (articleTuEdit.getText().toString().trim().isEmpty()) articleTuEdit.setText(r.article);
-            if (articleCuEdit.getText().toString().trim().isEmpty()) articleCuEdit.setText(r.article);
+        // v1.2.1: a confirmed scan starts a NEW product dataset.
+        // Never mix missing OCR fields with values from the previous carton.
+        clearProductSpecificFieldsForNewScan();
+
+        productEdit.setText(r.productName);
+        descriptionEdit.setText(r.description);
+
+        String resolvedTu = r.articleTu;
+        String resolvedCu = r.articleCu;
+        if (resolvedTu.isEmpty() && resolvedCu.isEmpty() && !r.article.isEmpty()) {
+            resolvedTu = r.article;
+            resolvedCu = r.article;
+        } else {
+            if (resolvedTu.isEmpty() && !r.article.isEmpty()) resolvedTu = r.article;
+            if (resolvedCu.isEmpty() && !r.article.isEmpty()) resolvedCu = r.article;
         }
-        if (!r.batch.isEmpty()) batchEdit.setText(r.batch);
-        if (!r.piecesPerCarton.isEmpty()) piecesEdit.setText(r.piecesPerCarton);
-        if (!r.packageGtin14.isEmpty()) gtinEdit.setText(r.packageGtin14);
-        if (!r.madeIn.isEmpty()) madeInEdit.setText(r.madeIn);
-        if (!r.poCode.isEmpty()) poCodeEdit.setText(r.poCode);
+        articleTuEdit.setText(resolvedTu);
+        articleCuEdit.setText(resolvedCu);
+
+        batchEdit.setText(r.batch);
+        piecesEdit.setText(r.piecesPerCarton);
+        gtinEdit.setText(r.packageGtin14);
+        madeInEdit.setText(r.madeIn);
+        poCodeEdit.setText(r.poCode);
+
         if (!r.sscc.isEmpty()) ssccEdit.setText(r.sscc);
         if (!r.palletCount.isEmpty()) cartonsEdit.setText(r.palletCount);
-        if (!r.grossWeight.isEmpty()) grossWeightEdit.setText(r.grossWeight);
-        if (!r.material.isEmpty()) materialEdit.setText(r.material);
-        if (!r.customerSku.isEmpty()) customerSkuEdit.setText(r.customerSku);
-        if (!r.logisticsArticle.isEmpty()) logisticsArticleEdit.setText(r.logisticsArticle);
+
+        grossWeightEdit.setText(r.grossWeight);
+        materialEdit.setText(r.material);
+        customerSkuEdit.setText(r.customerSku);
+        logisticsArticleEdit.setText(r.logisticsArticle);
+
+        // Apply OCR expiry only when it contains an unambiguous full date.
+        // YYYY/MM is intentionally NOT guessed.
+        String parsedExpiry = normalizeOcrExpiry(r.expiryRaw);
+        if (!parsedExpiry.isEmpty()) expiryEdit.setText(parsedExpiry);
 
         String mainArticle = mainArticle();
         String autoPack = buildPackArticleLine(productEdit.getText().toString(), mainArticle);
-        if (!autoPack.isEmpty()) packArticleEdit.setText(autoPack);
-        if (customerSkuEdit.getText().toString().trim().isEmpty()) customerSkuEdit.setText(mainArticle);
-        if (materialEdit.getText().toString().trim().isEmpty()) materialEdit.setText(productEdit.getText().toString());
+        packArticleEdit.setText(autoPack);
 
-        photoStatus.setText("Dane ze skanu zastosowane. Sprawdź pola oznaczone jako niepewne przed PDF.");
-        saveForm(); saveProductCache(); updateTotal(); generatePreview(false);
+        if (r.detectedType.equals("PALLET LOGISTICS")) {
+            if (customerSkuEdit.getText().toString().trim().isEmpty()) customerSkuEdit.setText(mainArticle);
+            if (materialEdit.getText().toString().trim().isEmpty()) materialEdit.setText(productEdit.getText().toString());
+        }
+
+        // Do not leave a preview/PDF from the previous product visible when
+        // the new scan is incomplete and cannot yet generate a valid label.
+        preview.setImageDrawable(null);
+        pendingPdf = null;
+        if (gs1Status != null) gs1Status.setText("");
+
+        photoStatus.setText("Dane z nowego skanu zastosowane. Brakujące pola pozostawiono puste — nie użyto danych z poprzedniego kartonu.");
+        saveForm();
+        if (!mainArticle.isEmpty()) saveProductCache();
+        updateTotal();
+        generatePreview(false);
+    }
+
+    private void clearProductSpecificFieldsForNewScan() {
+        productEdit.setText("");
+        descriptionEdit.setText("");
+        articleTuEdit.setText("");
+        articleCuEdit.setText("");
+        piecesEdit.setText("");
+        batchEdit.setText("");
+        gtinEdit.setText("");
+        madeInEdit.setText("");
+        poCodeEdit.setText("");
+        packArticleEdit.setText("");
+
+        // Hidden logistics fields are also product-specific.
+        logisticsArticleEdit.setText("");
+        materialEdit.setText("");
+        customerSkuEdit.setText("");
+        grossWeightEdit.setText("");
+        dataMatrixEdit.setText("");
+    }
+
+    private String normalizeOcrExpiry(String raw) {
+        if (raw == null) return "";
+        String s = raw.trim().replace('-', '/');
+        if (s.isEmpty()) return "";
+
+        DateTimeFormatter out = DateTimeFormatter.ofPattern("dd/MM/yy", Locale.US);
+        String[] patterns = new String[]{"dd/MM/yy", "dd/MM/yyyy", "yyyy/MM/dd"};
+        for (String pattern : patterns) {
+            try {
+                LocalDate d = LocalDate.parse(s, DateTimeFormatter.ofPattern(pattern, Locale.US));
+                return d.format(out);
+            } catch (DateTimeParseException ignored) {}
+        }
+        return "";
     }
 
     private String buildPackArticleLine(String product, String article) {
@@ -677,7 +744,7 @@ public class MainActivity extends Activity {
     private void saveProductCache() {
         String article = mainArticle();
         if (article.isEmpty()) return;
-        String prefix = "cache_" + article + "_";
+        String prefix = "cache_v2_" + article + "_";
         prefs.edit().putString(prefix + "product", clean(productEdit)).putString(prefix + "description", clean(descriptionEdit))
                 .putString(prefix + "gtin", clean(gtinEdit)).putString(prefix + "pieces", clean(piecesEdit)).putString(prefix + "madeIn", clean(madeInEdit)).apply();
     }
@@ -699,20 +766,46 @@ public class MainActivity extends Activity {
                 .apply();
     }
 
+    private void migrateTo121() {
+        if (prefs.getInt("dataModelVersion", 0) >= 121) return;
+
+        // v1.2 could save a mixed product when OCR missed Article/name.
+        // Clear only product-specific current-form data once.
+        // Pallet settings (COUNT, expiry, SSCC) and template constants stay.
+        prefs.edit()
+                .putString("product", "")
+                .putString("description", "")
+                .putString("articleTu", "")
+                .putString("articleCu", "")
+                .putString("pieces", "")
+                .putString("batch", "")
+                .putString("gtin", "")
+                .putString("madeIn", "")
+                .putString("poCode", "")
+                .putString("pack", "")
+                .putString("logArticle", "")
+                .putString("material", "")
+                .putString("customerSku", "")
+                .putString("grossWeight", "")
+                .putString("dataMatrix", "")
+                .putInt("dataModelVersion", 121)
+                .apply();
+    }
+
     private void loadForm() {
-        productEdit.setText(prefs.getString("product", "RC SCRUB YOZAKURA"));
+        productEdit.setText(prefs.getString("product", ""));
         descriptionEdit.setText(prefs.getString("description", ""));
-        articleTuEdit.setText(prefs.getString("articleTu", "1120211"));
-        articleCuEdit.setText(prefs.getString("articleCu", "1120211"));
-        piecesEdit.setText(prefs.getString("pieces", "60"));
-        batchEdit.setText(prefs.getString("batch", "12342064"));
-        gtinEdit.setText(prefs.getString("gtin", "08720296062361"));
+        articleTuEdit.setText(prefs.getString("articleTu", ""));
+        articleCuEdit.setText(prefs.getString("articleCu", ""));
+        piecesEdit.setText(prefs.getString("pieces", ""));
+        batchEdit.setText(prefs.getString("batch", ""));
+        gtinEdit.setText(prefs.getString("gtin", ""));
         madeInEdit.setText(prefs.getString("madeIn", ""));
         cartonsEdit.setText(prefs.getString("cartons", "16"));
         expiryEdit.setText(prefs.getString("expiry", defaultExpiry()));
         ssccEdit.setText(prefs.getString("sscc", DEFAULT_OLD_SSCC));
         poCodeEdit.setText(prefs.getString("poCode", ""));
-        packArticleEdit.setText(prefs.getString("pack", "125G1120211"));
+        packArticleEdit.setText(prefs.getString("pack", ""));
         referenceEdit.setText(prefs.getString("reference", "1501333"));
         topRightSmallEdit.setText(prefs.getString("topRightSmall", "NLVL"));
         routeEdit.setText(prefs.getString("route", "91/NR"));

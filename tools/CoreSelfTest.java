@@ -19,6 +19,7 @@ public class CoreSelfTest {
     public static void main(String[] args) {
         testBrownCarton();
         testBrownBarcodePriority();
+        testNoisyBrownProductNormalization();
         testUnitEanIsNotCartonGtin();
         testWhiteCarton();
         testSemifinished();
@@ -64,6 +65,17 @@ public class CoreSelfTest {
         eq("barcode package priority", "08720296066512", r.packageGtin14);
         eq("barcode source", "BARCODE_13_PACKAGE", r.gtinSource);
         ok("batch normalized", r.batchNormalized);
+    }
+
+    private static void testNoisyBrownProductNormalization() {
+        String text =
+                "RITUALS\n" +
+                "The Rial of Yozakura Body Cream 100nl\n" +
+                "Art Nr. TU: 1120728\n" +
+                "100 x 8719134207286\n" +
+                "Batch code: 0362929";
+        OcrResult r = OcrParser.parse(text, "RITUALS BROWN");
+        eq("noisy brown product cleanup", "The Ritual of Yozakura Body Cream 100ml", r.productName);
     }
 
     private static void testUnitEanIsNotCartonGtin() {

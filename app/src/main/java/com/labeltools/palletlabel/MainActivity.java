@@ -137,7 +137,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView version = new TextView(this);
-        version.setText("v1.3.2 • fresh preview • safer GTIN • offline");
+        version.setText("v1.3.3 • enhanced barcode • product memory • offline");
         version.setTextSize(13);
         version.setTextColor(Color.rgb(90, 90, 90));
         version.setPadding(0, dp(2), 0, dp(8));
@@ -296,8 +296,8 @@ public class MainActivity extends Activity {
             gs1Toggle.setText(open ? "Pokaż szczegóły GS1" : "Ukryj szczegóły GS1");
         });
 
-        Button saveDefaults = secondaryButton("Zapisz obecne dane jako domyślne");
-        saveDefaults.setOnClickListener(v -> { saveForm(); saveProductCache(); toast("Dane zapisane lokalnie."); });
+        Button saveDefaults = secondaryButton("Zapamiętaj poprawione dane produktu");
+        saveDefaults.setOnClickListener(v -> { saveForm(); saveProductCache(); toast("Dane produktu zapamiętane dla tego Article."); });
         outputCard.addView(saveDefaults, marginTop(matchWrap(), dp(8)));
         root.addView(outputCard, marginTop(matchWrap(), gap));
         attachPreviewInvalidationWatchers();
@@ -514,7 +514,7 @@ public class MainActivity extends Activity {
         try {
             InputImage image = InputImage.fromFilePath(this, uri);
             ScanSession session = new ScanSession(generation, forcedMode);
-            session.pending = brownEnhancement ? 3 : 2;
+            session.pending = brownEnhancement ? 4 : 2;
 
             textRecognizer.process(image)
                     .addOnSuccessListener(text -> {
@@ -535,13 +535,41 @@ public class MainActivity extends Activity {
             if (brownEnhancement) {
                 Bitmap enhanced = buildEnhancedOcrBitmap(uri);
                 if (enhanced == null) {
+                    // Two enhanced consumers were expected: OCR + barcode.
+                    scanPartDone(session);
                     scanPartDone(session);
                 } else {
-                    InputImage enhancedImage = InputImage.fromBitmap(enhanced, 0);
-                    textRecognizer.process(enhancedImage)
+                    // v1.3.3: use the same contrast-enhanced image for BOTH text OCR and barcode scanning.
+                    // Keep the bitmap alive until both async ML Kit tasks finish.
+                    final int[] enhancedConsumers = {2};
+                    Runnable releaseEnhanced = () -> {
+                        synchronized (enhancedConsumers) {
+                            enhancedConsumers[0]--;
+                            if (enhancedConsumers[0] == 0) {
+                                try { enhanced.recycle(); } catch (Exception ignored) {}
+                            }
+                        }
+                    };
+
+                    InputImage enhancedTextImage = InputImage.fromBitmap(enhanced, 0);
+                    textRecognizer.process(enhancedTextImage)
                             .addOnSuccessListener(text -> session.enhancedText = text.getText())
                             .addOnCompleteListener(task -> {
-                                try { enhanced.recycle(); } catch (Exception ignored) {}
+                                releaseEnhanced.run();
+                                scanPartDone(session);
+                            });
+
+                    InputImage enhancedBarcodeImage = InputImage.fromBitmap(enhanced, 0);
+                    barcodeScanner.process(enhancedBarcodeImage)
+                            .addOnSuccessListener(codes -> {
+                                for (Barcode b : codes) {
+                                    if (b.getRawValue() != null && !session.barcodeValues.contains(b.getRawValue())) {
+                                        session.barcodeValues.add(b.getRawValue());
+                                    }
+                                }
+                            })
+                            .addOnCompleteListener(task -> {
+                                releaseEnhanced.run();
                                 scanPartDone(session);
                             });
                 }
@@ -607,7 +635,9 @@ public class MainActivity extends Activity {
 
         OcrResult result = OcrParser.parse(lastOcrText, session.forcedMode);
         OcrParser.applyBarcodeValues(result, session.barcodeValues);
-        // v1.3.2: wynik należy tylko do bieżącego skanu; historia nie nadpisuje OCR.
+        // Safe cache: only product metadata may replace LOW/MEDIUM OCR for an exact saved Article.
+        // Batch, GTIN, Article and SSCC are NEVER restored from history.
+        enrichFromCache(result);
         showVerification(result, session.generation);
     }
 
@@ -616,23 +646,34 @@ public class MainActivity extends Activity {
         String prefix = "cache_v3_" + r.article + "_";
         boolean used = false;
 
-        String value;
-        if (r.productName.isEmpty()) {
-            value = prefs.getString(prefix + "product", "");
-            if (!value.isEmpty()) { r.productName = value; used = true; }
+        String value = prefs.getString(prefix + "product", "");
+        if (!value.isEmpty() && r.confidenceOf("product") != OcrResult.Confidence.HIGH) {
+            r.productName = value;
+            r.mark("product", OcrResult.Confidence.MEDIUM);
+            used = true;
         }
-        if (r.description.isEmpty()) {
-            value = prefs.getString(prefix + "description", "");
-            if (!value.isEmpty()) { r.description = value; used = true; }
+
+        value = prefs.getString(prefix + "description", "");
+        if (!value.isEmpty() && r.confidenceOf("description") != OcrResult.Confidence.HIGH) {
+            r.description = value;
+            r.mark("description", OcrResult.Confidence.MEDIUM);
+            used = true;
         }
-        if (r.piecesPerCarton.isEmpty()) {
-            value = prefs.getString(prefix + "pieces", "");
-            if (!value.isEmpty()) { r.piecesPerCarton = value; used = true; }
+
+        value = prefs.getString(prefix + "pieces", "");
+        if (!value.isEmpty() && r.confidenceOf("pieces") == OcrResult.Confidence.LOW) {
+            r.piecesPerCarton = value;
+            r.mark("pieces", OcrResult.Confidence.MEDIUM);
+            used = true;
         }
-        if (r.madeIn.isEmpty()) {
-            value = prefs.getString(prefix + "madeIn", "");
-            if (!value.isEmpty()) { r.madeIn = value; used = true; }
+
+        value = prefs.getString(prefix + "madeIn", "");
+        if (!value.isEmpty() && r.confidenceOf("madeIn") != OcrResult.Confidence.HIGH) {
+            r.madeIn = value;
+            r.mark("madeIn", OcrResult.Confidence.MEDIUM);
+            used = true;
         }
+
         r.cacheUsed = used;
     }
 

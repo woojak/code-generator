@@ -21,6 +21,7 @@ import java.util.Map;
 public final class LogisticsLabelRenderer {
     public static final float LABEL_W_MM = 105f;
     public static final float LABEL_H_MM = 148f;
+    private static final char FNC1 = '\u00f1';
 
     private LogisticsLabelRenderer() {}
 
@@ -86,7 +87,7 @@ public final class LogisticsLabelRenderer {
         text(c, p, "BRUTTO PALLET WEIGHT", 70, 85, 2.3f, sx, sy, true);
         text(c, p, d.grossWeight, 76, 92, 4.0f, sx, sy, false);
 
-        String raw1 = "02" + d.contentGtin + (d.expiryAi.isEmpty() ? "" : "17" + d.expiryAi) + "37" + d.cartons + "10" + d.batch;
+        String raw1 = "02" + d.contentGtin + (d.expiryAi.isEmpty() ? "" : "17" + d.expiryAi) + "37" + d.cartons + FNC1 + "10" + d.batch;
         String raw2 = "00" + d.sscc + "3302" + grossAi3302(d.grossWeight);
         LabelRenderer.drawBarcode(c, raw1, 8, 98, 82, 15, sx, sy);
         text(c, p, d.barcode1Human() + "(10)" + d.batch, 28, 116, 2.2f, sx, sy, true);

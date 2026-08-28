@@ -468,6 +468,9 @@ public final class OcrParser {
     private static String cleanProduct(String s) {
         if (s == null) return "";
         return s.replaceAll("(?i)^rituals\\s*[.:_-]*\\s*", "")
+                // Common brown-carton OCR damage seen in production photos.
+                .replaceAll("(?i)\\bThe\\s+Rial\\s+of\\b", "The Ritual of")
+                .replaceAll("(?i)\\b(\\d{1,4})\\s*n[l1]\\b", "$1ml")
                 .replaceAll("(?i)\\s+GS$", "")
                 .replaceAll("\\s{2,}", " ")
                 .trim();

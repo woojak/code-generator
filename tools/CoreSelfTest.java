@@ -19,6 +19,7 @@ public class CoreSelfTest {
     public static void main(String[] args) {
         testBrownCarton();
         testBrownBarcodePriority();
+        testUnitEanIsNotCartonGtin();
         testWhiteCarton();
         testSemifinished();
         testNoExpiry();
@@ -63,6 +64,19 @@ public class CoreSelfTest {
         eq("barcode package priority", "08720296066512", r.packageGtin14);
         eq("barcode source", "BARCODE_13_PACKAGE", r.gtinSource);
         ok("batch normalized", r.batchNormalized);
+    }
+
+    private static void testUnitEanIsNotCartonGtin() {
+        String text =
+                "RITUALS\n" +
+                "The Ritual of Yozakura Body Cream 100ml\n" +
+                "Art Nr. TU: 1120728\n" +
+                "100 x 8719134207286\n" +
+                "Batch code: 0362929";
+        OcrResult r = OcrParser.parse(text, "RITUALS BROWN");
+        OcrParser.applyBarcodeValues(r, Arrays.asList("8719134207286"));
+        eq("unit EAN must not become carton GTIN", "", r.packageGtin14);
+        eq("unit-only source", "UNIT_EAN_ONLY", r.gtinSource);
     }
 
     private static void testWhiteCarton() {

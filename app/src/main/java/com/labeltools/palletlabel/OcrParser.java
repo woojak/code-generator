@@ -43,13 +43,9 @@ public final class OcrParser {
         if (r.material.isEmpty()) r.material = r.productName;
 
         if (r.packageGtin14.isEmpty() && !r.unitEan.isEmpty()) {
-            String derived = Gs1Utils.normalizeGtin14(r.unitEan);
-            if (!derived.isEmpty()) {
-                r.packageGtin14 = derived;
-                r.gtinSource = "UNIT_EAN_DERIVED";
-                r.mark("gtin", OcrResult.Confidence.MEDIUM);
-                r.warn("GTIN-14 utworzono z EAN produktu. Sprawdź kod kartonu przed wydrukiem.");
-            }
+            r.gtinSource = "UNIT_EAN_ONLY";
+            r.mark("gtin", OcrResult.Confidence.LOW);
+            r.warn("Znaleziono EAN produktu, ale nie znaleziono pewnego GTIN kartonu. Pole GTIN kartonu pozostawiono puste.");
         }
 
         return r;
@@ -82,14 +78,17 @@ public final class OcrParser {
             else if (d.length() == 13 && Gs1Utils.isValidGtin13(d)) valid13.add(d);
         }
 
-        if (!valid14.isEmpty()) {
-            r.packageGtin14 = valid14.get(0);
-            r.gtinSource = "BARCODE_14";
-            r.mark("gtin", OcrResult.Confidence.HIGH);
-            return;
+        String unit = Gs1Utils.digitsOnly(r.unitEan);
+
+        for (String d : valid14) {
+            if (!d.equals(unit)) {
+                r.packageGtin14 = d;
+                r.gtinSource = "BARCODE_14";
+                r.mark("gtin", OcrResult.Confidence.HIGH);
+                return;
+            }
         }
 
-        String unit = Gs1Utils.digitsOnly(r.unitEan);
         for (String d : valid13) {
             if (!d.equals(unit)) {
                 r.packageGtin14 = "0" + d;
@@ -99,17 +98,10 @@ public final class OcrParser {
             }
         }
 
-        if (!valid13.isEmpty() && (r.packageGtin14.isEmpty() || "UNIT_EAN_DERIVED".equals(r.gtinSource))) {
-            String d = valid13.get(0);
-            r.packageGtin14 = "0" + d;
-            if (d.equals(unit)) {
-                r.gtinSource = "UNIT_EAN_DERIVED";
-                r.mark("gtin", OcrResult.Confidence.MEDIUM);
-                r.warn("Skaner znalazł tylko EAN produktu. Brak pewnego kodu kartonu.");
-            } else {
-                r.gtinSource = "BARCODE_13_PACKAGE";
-                r.mark("gtin", OcrResult.Confidence.HIGH);
-            }
+        if (r.packageGtin14.isEmpty() && (!valid13.isEmpty() || !valid14.isEmpty())) {
+            r.gtinSource = "UNIT_EAN_ONLY";
+            r.mark("gtin", OcrResult.Confidence.LOW);
+            r.warn("Skaner znalazł tylko EAN produktu. GTIN kartonu pozostawiono pusty.");
         }
     }
 

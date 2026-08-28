@@ -82,6 +82,7 @@ public class MainActivity extends Activity {
     private String lastOcrText = "";
     private long activeScanGeneration = 0L;
     private AlertDialog verificationDialog;
+    private boolean suppressPreviewInvalidation = false;
 
     private static class ScanSession {
         final long generation;
@@ -108,8 +109,10 @@ public class MainActivity extends Activity {
                         Barcode.FORMAT_EAN_8, Barcode.FORMAT_UPC_A, Barcode.FORMAT_DATA_MATRIX)
                 .build();
         barcodeScanner = BarcodeScanning.getClient(options);
+        suppressPreviewInvalidation = true;
         setContentView(buildUi());
         loadForm();
+        suppressPreviewInvalidation = false;
         updateTotal();
         updateOutputTemplateUi();
         if (preview != null) preview.setImageDrawable(null);
@@ -134,7 +137,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView version = new TextView(this);
-        version.setText("v1.3.1 • scan isolation • safe GS1 • offline");
+        version.setText("v1.3.2 • fresh preview • safer GTIN • offline");
         version.setTextSize(13);
         version.setTextColor(Color.rgb(90, 90, 90));
         version.setPadding(0, dp(2), 0, dp(8));
@@ -220,7 +223,10 @@ public class MainActivity extends Activity {
         palletCard.addView(smallLabel("Szablon PDF"));
         outputTemplateSpinner = spinner(new String[]{"STANDARD", "LOGISTICS (BETA)"});
         outputTemplateSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) { updateOutputTemplateUi(); }
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                updateOutputTemplateUi();
+                invalidateGeneratedOutput("Szablon zmieniony — odśwież podgląd.");
+            }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
         palletCard.addView(outputTemplateSpinner, matchWrap());
@@ -294,6 +300,7 @@ public class MainActivity extends Activity {
         saveDefaults.setOnClickListener(v -> { saveForm(); saveProductCache(); toast("Dane zapisane lokalnie."); });
         outputCard.addView(saveDefaults, marginTop(matchWrap(), dp(8)));
         root.addView(outputCard, marginTop(matchWrap(), gap));
+        attachPreviewInvalidationWatchers();
         return scroll;
     }
 
@@ -412,6 +419,33 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void attachPreviewInvalidationWatchers() {
+        EditText[] fields = new EditText[]{
+                productEdit, descriptionEdit, articleTuEdit, articleCuEdit, piecesEdit, batchEdit, gtinEdit, madeInEdit,
+                cartonsEdit, expiryEdit, ssccEdit, packArticleEdit, referenceEdit, topRightSmallEdit, routeEdit, poCodeEdit,
+                logisticsArticleEdit, materialEdit, customerSkuEdit, grossWeightEdit, dataMatrixEdit,
+                shipper1Edit, shipper2Edit, shipper3Edit, shipper4Edit, shipper5Edit
+        };
+        for (EditText field : fields) {
+            if (field == null) continue;
+            field.addTextChangedListener(new TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+                @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                    invalidateGeneratedOutput("Dane zmienione — podgląd wymaga odświeżenia.");
+                }
+                @Override public void afterTextChanged(Editable s) {}
+            });
+        }
+    }
+
+    private void invalidateGeneratedOutput(String message) {
+        if (suppressPreviewInvalidation) return;
+        if (preview != null) preview.setImageDrawable(null);
+        pendingPdf = null;
+        if (gs1Status != null) gs1Status.setText("");
+        if (photoStatus != null && message != null && !message.isEmpty()) photoStatus.setText(message);
+    }
+
     private void updateTotal() {
         int c = parseInt(cartonsEdit == null ? "0" : cartonsEdit.getText().toString());
         int p = parseInt(piecesEdit == null ? "0" : piecesEdit.getText().toString());
@@ -470,11 +504,12 @@ public class MainActivity extends Activity {
         }
         verificationDialog = null;
         lastOcrText = "";
+        invalidateGeneratedOutput("Nowy skan — stary podgląd został wycofany.");
 
         String forcedMode = scanModeSpinner.getSelectedItem().toString();
-        boolean brownEnhancement = "RITUALS BROWN".equals(forcedMode);
+        boolean brownEnhancement = "RITUALS BROWN".equals(forcedMode) || "AUTO".equals(forcedMode);
         photoStatus.setText(brownEnhancement
-                ? "Analizuję: OCR + wzmocniony OCR dla brązowego kartonu + barcode..."
+                ? "Analizuję: OCR + wzmocniony OCR + barcode..."
                 : "Analizuję: OCR + barcode...");
         try {
             InputImage image = InputImage.fromFilePath(this, uri);
@@ -572,7 +607,7 @@ public class MainActivity extends Activity {
 
         OcrResult result = OcrParser.parse(lastOcrText, session.forcedMode);
         OcrParser.applyBarcodeValues(result, session.barcodeValues);
-        // v1.3.1: OCR nie jest automatycznie nadpisywany historią/cache.
+        // v1.3.2: wynik należy tylko do bieżącego skanu; historia nie nadpisuje OCR.
         showVerification(result, session.generation);
     }
 
@@ -658,6 +693,7 @@ public class MainActivity extends Activity {
             case "OCR_PACKAGE_HRI": return "cyfry pod kodem kartonu odczytane przez OCR";
             case "LOGISTICS_CONTENT": return "pole CONTENT z etykiety logistycznej";
             case "UNIT_EAN_DERIVED": return "UWAGA: przeliczone z EAN produktu";
+            case "UNIT_EAN_ONLY": return "brak pewnego GTIN kartonu — znaleziono tylko EAN produktu";
             default: return source;
         }
     }
@@ -859,8 +895,13 @@ public class MainActivity extends Activity {
                         + "\n\nRazem: " + d.totalPieces() + " szt.");
             }
             saveForm();
+            if (photoStatus != null) photoStatus.setText("Podgląd odświeżony dla aktualnych danych.");
             if (notify) toast("Etykieta wygenerowana.");
-        } catch (Exception e) { if (gs1Status != null) gs1Status.setText("Błąd: " + e.getMessage()); if (notify) toast(e.getMessage()); }
+        } catch (Exception e) {
+            invalidateGeneratedOutput("Nie można wygenerować podglądu: " + e.getMessage());
+            if (gs1Status != null) gs1Status.setText("Błąd: " + e.getMessage());
+            if (notify) toast(e.getMessage());
+        }
     }
 
     private byte[] renderPdf(LabelData d) throws Exception {
